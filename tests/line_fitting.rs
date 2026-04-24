@@ -1,5 +1,5 @@
 use arrsac::Arrsac;
-use levenberg_marquardt::{LeastSquaresProblem, LevenbergMarquardt};
+use levenberg_marquardt::{LeastSquaresProblem, LevenbergMarquardt, SparseJacobian};
 use nalgebra::{
     Dim, Dyn, Matrix, Matrix2, OMatrix, VecStorage, Vector2,
     dimension::{U1, U2},
@@ -96,7 +96,6 @@ struct LineFittingOptimizationProblem<'a> {
 
 impl<'a> LeastSquaresProblem<F, Dyn, U2> for LineFittingOptimizationProblem<'a> {
     type ParameterStorage = Owned<F, U2, U1>;
-    type JacobianStorage = Owned<F, Dyn, U2>;
     type ResidualStorage = VecStorage<F, Dyn, U1>;
 
     fn set_params(&mut self, p: &Vector2<F>) {
@@ -122,15 +121,15 @@ impl<'a> LeastSquaresProblem<F, Dyn, U2> for LineFittingOptimizationProblem<'a> 
         ))
     }
 
-    fn jacobian(&self) -> Option<OMatrix<F, Dyn, U2>> {
-        let u2 = Dim::from_usize(2);
+    fn jacobian(&self) -> Option<SparseJacobian<F>> {
+        let u2 = U2;
         let mut jacobian = OMatrix::zeros_generic(Dyn::from_usize(self.points.len() * 2), u2);
         for (i, point) in self.points.iter().enumerate() {
             jacobian
                 .view_range_mut(2 * i..2 * (i + 1), ..)
                 .copy_from(&self.model.jacobian(*point));
         }
-        Some(jacobian)
+        Some(SparseJacobian::from_dense(jacobian))
     }
 }
 

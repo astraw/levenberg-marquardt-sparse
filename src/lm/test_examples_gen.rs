@@ -14,7 +14,7 @@ fn test_linear_full_rank() {
         0.4236547993389047,
     ]));
     let jac_num = differentiate_numerically(&mut problem).unwrap();
-    let jac_trait = problem.jacobian().unwrap();
+    let jac_trait = problem.jacobian().unwrap().to_dense::<_, _>();
     assert_relative_eq!(jac_num, jac_trait, epsilon = 1e-5);
 
     problem.set_params(&initial.clone());
@@ -83,7 +83,7 @@ fn test_linear_rank1() {
         0.3834415188257777,
     ]));
     let jac_num = differentiate_numerically(&mut problem).unwrap();
-    let jac_trait = problem.jacobian().unwrap();
+    let jac_trait = problem.jacobian().unwrap().to_dense::<_, _>();
     assert_relative_eq!(jac_num, jac_trait, epsilon = 1e-5);
 
     problem.set_params(&initial.clone());
@@ -152,7 +152,7 @@ fn test_linear_rank1_zero_columns() {
         0.07103605819788694,
     ]));
     let jac_num = differentiate_numerically(&mut problem).unwrap();
-    let jac_trait = problem.jacobian().unwrap();
+    let jac_trait = problem.jacobian().unwrap().to_dense::<_, _>();
     assert_relative_eq!(jac_num, jac_trait, epsilon = 1e-5);
 
     problem.set_params(&initial.clone());
@@ -220,7 +220,7 @@ fn test_rosenbruck() {
         0.02021839744032572,
     ]));
     let jac_num = differentiate_numerically(&mut problem).unwrap();
-    let jac_trait = problem.jacobian().unwrap();
+    let jac_trait = problem.jacobian().unwrap().to_dense::<_, _>();
     assert_relative_eq!(jac_num, jac_trait, epsilon = 1e-5);
 
     problem.set_params(&initial.clone());
@@ -296,7 +296,7 @@ fn test_helical_valley() {
         0.8700121482468192,
     ]));
     let jac_num = differentiate_numerically(&mut problem).unwrap();
-    let jac_trait = problem.jacobian().unwrap();
+    let jac_trait = problem.jacobian().unwrap().to_dense::<_, _>();
     assert_relative_eq!(jac_num, jac_trait, epsilon = 1e-5);
 
     problem.set_params(&initial.clone());
@@ -367,7 +367,7 @@ fn test_powell_singular() {
         0.7805291762864555,
     ]));
     let jac_num = differentiate_numerically(&mut problem).unwrap();
-    let jac_trait = problem.jacobian().unwrap();
+    let jac_trait = problem.jacobian().unwrap().to_dense::<_, _>();
     assert_relative_eq!(jac_num, jac_trait, epsilon = 1e-5);
 
     problem.set_params(&initial.clone());
@@ -442,7 +442,7 @@ fn test_freudenstein_roth() {
         0.6399210213275238,
     ]));
     let jac_num = differentiate_numerically(&mut problem).unwrap();
-    let jac_trait = problem.jacobian().unwrap();
+    let jac_trait = problem.jacobian().unwrap().to_dense::<_, _>();
     assert_relative_eq!(jac_num, jac_trait, epsilon = 1e-5);
 
     problem.set_params(&initial.clone());
@@ -512,7 +512,7 @@ fn test_bard() {
         0.5218483217500717,
     ]));
     let jac_num = differentiate_numerically(&mut problem).unwrap();
-    let jac_trait = problem.jacobian().unwrap();
+    let jac_trait = problem.jacobian().unwrap().to_dense::<_, _>();
     assert_relative_eq!(jac_num, jac_trait, epsilon = 1e-5);
 
     problem.set_params(&initial.clone());
@@ -595,7 +595,7 @@ fn test_kowalik_osborne() {
         0.45615033221654855,
     ]));
     let jac_num = differentiate_numerically(&mut problem).unwrap();
-    let jac_trait = problem.jacobian().unwrap();
+    let jac_trait = problem.jacobian().unwrap().to_dense::<_, _>();
     assert_relative_eq!(jac_num, jac_trait, epsilon = 1e-5);
 
     problem.set_params(&initial.clone());
@@ -674,7 +674,7 @@ fn test_meyer() {
         0.6176354970758771,
     ]));
     let jac_num = differentiate_numerically(&mut problem).unwrap();
-    let jac_trait = problem.jacobian().unwrap();
+    let jac_trait = problem.jacobian().unwrap().to_dense::<_, _>();
     assert_relative_eq!(jac_num, jac_trait, epsilon = 1e-5);
 
     problem.set_params(&initial.clone());
@@ -800,7 +800,7 @@ fn test_watson() {
         0.43703195379934145,
     ]));
     let jac_num = differentiate_numerically(&mut problem).unwrap();
-    let jac_trait = problem.jacobian().unwrap();
+    let jac_trait = problem.jacobian().unwrap().to_dense::<_, _>();
     assert_relative_eq!(jac_num, jac_trait, epsilon = 1e-5);
 
     problem.set_params(&initial.clone());
@@ -1070,7 +1070,7 @@ fn test_beale() {
         0.06022547162926983,
     ]));
     let jac_num = differentiate_numerically(&mut problem).unwrap();
-    let jac_trait = problem.jacobian().unwrap();
+    let jac_trait = problem.jacobian().unwrap().to_dense::<_, _>();
     assert_relative_eq!(jac_num, jac_trait, epsilon = 1e-5);
 
     problem.set_params(&initial.clone());

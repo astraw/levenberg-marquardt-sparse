@@ -51,7 +51,7 @@
 //! ```
 //! # use nalgebra::*;
 //! # use nalgebra::storage::Owned;
-//! # use levenberg_marquardt::{LeastSquaresProblem, LevenbergMarquardt};
+//! # use levenberg_marquardt::{LeastSquaresProblem, LevenbergMarquardt, SparseJacobian};
 //! struct ExampleProblem {
 //!     // holds current value of the n parameters
 //!     p: Vector2<f64>,
@@ -61,36 +61,35 @@
 //! impl LeastSquaresProblem<f64, U2, U2> for ExampleProblem {
 //!     type ParameterStorage = Owned<f64, U2>;
 //!     type ResidualStorage = Owned<f64, U2>;
-//!     type JacobianStorage = Owned<f64, U2, U2>;
-//!     
+//!
 //!     fn set_params(&mut self, p: &Vector2<f64>) {
 //!         self.p.copy_from(p);
 //!         // do common calculations for residuals and the Jacobian here
 //!     }
-//!     
+//!
 //!     fn params(&self) -> Vector2<f64> { self.p }
-//!     
+//!
 //!     fn residuals(&self) -> Option<Vector2<f64>> {
 //!         let [x, y] = [self.p.x, self.p.y];
 //!         // vector containing residuals $r_1(\vec{x})$ and $r_2(\vec{x})$
 //!         Some(Vector2::new(x*x + y - 11., x + y*y - 7.))
 //!     }
-//!     
-//!     fn jacobian(&self) -> Option<Matrix2<f64>> {
+//!
+//!     fn jacobian(&self) -> Option<SparseJacobian<f64>> {
 //!         let [x, y] = [self.p.x, self.p.y];
-//!         
+//!
 //!         // first row of Jacobian, derivatives of first residual
 //!         let d1_x = 2. * x; // $\frac{\partial}{\partial x_1}r_1(\vec{x}) = \frac{\partial}{\partial x} (x^2 + y - 11) = 2x$
 //!         let d1_y = 1.;     // $\frac{\partial}{\partial x_2}r_1(\vec{x}) = \frac{\partial}{\partial y} (x^2 + y - 11) = 1$
-//!         
+//!
 //!         // second row of Jacobian, derivatives of second residual
 //!         let d2_x = 1.;     // $\frac{\partial}{\partial x_1}r_2(\vec{x}) = \frac{\partial}{\partial x} (x + y^2 - 7) = 1$
 //!         let d2_y = 2. * y; // $\frac{\partial}{\partial x_2}r_2(\vec{x}) = \frac{\partial}{\partial y} (x + y^2 - 7) = 2y$
 //!
-//!         Some(Matrix2::new(
+//!         Some(SparseJacobian::from_dense(Matrix2::new(
 //!             d1_x, d1_y,
 //!             d2_x, d2_y,
-//!         ))
+//!         )))
 //!     }
 //! }
 //!
@@ -120,7 +119,7 @@ mod trust_region;
 pub(crate) mod utils;
 
 pub use lm::TerminationReason;
-pub use problem::LeastSquaresProblem;
+pub use problem::{LeastSquaresProblem, SparseJacobian};
 
 pub use utils::{differentiate_holomorphic_numerically, differentiate_numerically};
 

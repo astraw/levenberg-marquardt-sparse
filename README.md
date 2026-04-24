@@ -43,6 +43,18 @@ impl LeastSquaresProblem<f64> for Problem {
 let problem = Problem::new(initial_params);
 let (problem, report) = LevenbergMarquardt::new().minimize(problem);
 assert!(report.termination.was_successful());
+
+// Experimental sparse backend (uses sparse Jacobian products)
+let (_problem, _report) = LevenbergMarquardt::new()
+    .with_sparse_solver(true)
+    .minimize(Problem::new(initial_params));
+
+// Schur-style sparse backend for BA-like parameter layout where
+// cameras/state come first and landmarks/points come after.
+let (_problem, _report) = LevenbergMarquardt::new()
+    .with_sparse_solver(true)
+    .with_sparse_schur_camera_variables(num_camera_variables)
+    .minimize(Problem::new(initial_params));
 ```
 
 # References
