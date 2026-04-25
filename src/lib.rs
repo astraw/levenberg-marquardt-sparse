@@ -1,5 +1,17 @@
-//! Implementation of the [Levenberg-Marquardt](https://en.wikipedia.org/wiki/Levenberg%E2%80%93Marquardt_algorithm)
+//! Sparse implementation of the
+//! [Levenberg-Marquardt](https://en.wikipedia.org/wiki/Levenberg%E2%80%93Marquardt_algorithm)
 //! optimization algorithm using [nalgebra](https://nalgebra.org).
+//!
+//! This crate is a fork of `levenberg-marquardt` that removes the dense QR-based
+//! solver path and always uses a sparse normal-equations solve based on
+//! Jacobi-preconditioned Conjugate Gradient (PCG).
+//!
+//! The port from the original dense implementation to sparse matrices was carried
+//! out via agentic coding using GitHub Copilot.
+//!
+//! It is intended for problems where the Jacobian is sparse, such as bundle
+//! adjustment and SLAM, while still providing a dense-to-sparse bridge through
+//! [`SparseJacobian::from_dense`] for small examples and migration.
 //!
 //! This algorithm tries to solve the least squares optimization problem
 //! ```math
@@ -18,7 +30,8 @@
 //! You must provide an implementation of
 //!
 //! - the residual vector `$\vec{x} \mapsto (r_1(\vec{x}), \ldots, r_m(\vec{x}))^\top\in\R^m$`
-//! - and its Jacobian `$\mathbf{J} \in \R^{m\times n}$`, defined as
+//! - and its Jacobian `$\mathbf{J} \in \R^{m\times n}$`, returned as a
+//!   [`SparseJacobian`] in triplet (COO) format, defined as
 //!   ```math
 //!   \mathbf{J} \coloneqq
 //!   \def\arraystretch{1.5}
@@ -34,8 +47,15 @@
 //! be a constant value, but typically the optimization result crucially depends
 //! on a good initial value.
 //!
+//! `SparseJacobian` stores `(row, col, value)` entries. You can construct it
+//! directly with [`SparseJacobian::new`] or [`SparseJacobian::from_triplets`],
+//! or use [`SparseJacobian::from_dense`] as a bridge when migrating existing
+//! dense code.
+//!
 //! The algorithm also has a number of hyperparameters which are documented
 //! at [`LevenbergMarquardt`](struct.LevenbergMarquardt.html).
+//!
+//! This crate is `#![no_std]` and requires `alloc`.
 //!
 //! # Usage Example
 //!
@@ -86,10 +106,16 @@
 //!         let d2_x = 1.;     // $\frac{\partial}{\partial x_1}r_2(\vec{x}) = \frac{\partial}{\partial x} (x + y^2 - 7) = 1$
 //!         let d2_y = 2. * y; // $\frac{\partial}{\partial x_2}r_2(\vec{x}) = \frac{\partial}{\partial y} (x + y^2 - 7) = 2y$
 //!
-//!         Some(SparseJacobian::from_dense(Matrix2::new(
-//!             d1_x, d1_y,
-//!             d2_x, d2_y,
-//!         )))
+//!         Some(SparseJacobian::from_triplets(
+//!             2,
+//!             2,
+//!             vec![
+//!                 (0, 0, d1_x),
+//!                 (0, 1, d1_y),
+//!                 (1, 0, d2_x),
+//!                 (1, 1, d2_y),
+//!             ],
+//!         ))
 //!     }
 //! }
 //!

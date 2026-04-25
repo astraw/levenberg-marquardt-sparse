@@ -7,16 +7,15 @@ authors = [
 ]
 edition = "2024"
 description = "Sparse Levenberg-Marquardt algorithm using PCG-based normal equations, built on nalgebra"
-keywords = ["optimization", "optimizer", "levenberg", "marquardt", "sparse"]
+keywords = ["optimization", "sparse", "least-squares", "bundle-adjustment", "slam"]
 categories = [
     "algorithms",
     "computer-vision",
-    "science::robotics",
-    "no-std",
     "mathematics",
+    "no-std",
+    "science::robotics",
 ]
 repository = "https://github.com/rust-cv/levenberg-marquardt"
-documentation = "https://docs.rs/levenberg-marquardt-sparse/"
 license = "MIT"
 readme = "README.md"
 
