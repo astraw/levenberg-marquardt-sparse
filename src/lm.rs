@@ -1,10 +1,6 @@
 use crate::utils::enorm;
 use crate::{LeastSquaresProblem, SparseJacobian};
-use nalgebra::{
-    DefaultAllocator, Dim, OVector, RealField, Vector,
-    allocator::Allocator,
-    convert,
-};
+use nalgebra::{DefaultAllocator, Dim, OVector, RealField, Vector, allocator::Allocator, convert};
 use num_traits::Float;
 #[cfg(feature = "tracing")]
 use tracing::debug;
@@ -789,4 +785,3 @@ where
         }
     }
 }
-

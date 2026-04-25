@@ -240,33 +240,13 @@ where
 }
 
 #[inline]
-#[allow(clippy::unreadable_literal)]
-pub(crate) fn epsmch<F: RealField>() -> F {
-    if cfg!(feature = "minpack-compat") {
-        convert(2.22044604926e-16f64)
-    } else {
-        F::default_epsilon()
-    }
-}
-
-#[inline]
-#[allow(clippy::unreadable_literal)]
 pub(crate) fn giant<F: Float>() -> F {
-    if cfg!(feature = "minpack-compat") {
-        F::from(1.79769313485e+308f64).unwrap()
-    } else {
-        F::max_value()
-    }
+    F::max_value()
 }
 
 #[inline]
-#[allow(clippy::unreadable_literal)]
 pub(crate) fn dwarf<F: Float>() -> F {
-    if cfg!(feature = "minpack-compat") {
-        F::from(2.22507385852e-308f64).unwrap()
-    } else {
-        F::min_positive_value()
-    }
+    F::min_positive_value()
 }
 
 #[inline]
@@ -281,16 +261,8 @@ where
     let mut s3 = F::zero();
     let mut x1max = F::zero();
     let mut x3max = F::zero();
-    let agiant = if cfg!(feature = "minpack-compat") {
-        convert(1.304e19f64)
-    } else {
-        Float::sqrt(giant::<F>())
-    } / convert(v.nrows() as f64);
-    let rdwarf = if cfg!(feature = "minpack-compat") {
-        convert(3.834e-20f64)
-    } else {
-        Float::sqrt(dwarf())
-    };
+    let agiant = Float::sqrt(giant::<F>()) / convert(v.nrows() as f64);
+    let rdwarf = Float::sqrt(dwarf());
     for xi in v.iter() {
         let xabs = xi.abs();
         if unlikely(xabs.is_nan()) {
@@ -330,25 +302,6 @@ where
     } else {
         x3max * Float::sqrt(s3)
     }
-}
-
-#[inline]
-/// Dot product between two vectors
-pub(crate) fn dot<F, N, AS, BS>(a: &Vector<F, N, AS>, b: &Vector<F, N, BS>) -> F
-where
-    F: nalgebra::RealField + Copy,
-    N: Dim,
-    AS: Storage<F, N, U1>,
-    BS: Storage<F, N, U1>,
-{
-    // To achieve floating point equality with MINPACK
-    // the dot product implementation from nalgebra must not
-    // be used.
-    let mut dot = F::zero();
-    for (x, y) in a.iter().zip(b.iter()) {
-        dot += *x * *y;
-    }
-    dot
 }
 
 #[allow(dead_code)]
