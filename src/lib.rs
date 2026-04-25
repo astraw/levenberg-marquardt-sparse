@@ -51,7 +51,7 @@
 //! ```
 //! # use nalgebra::*;
 //! # use nalgebra::storage::Owned;
-//! # use levenberg_marquardt::{LeastSquaresProblem, LevenbergMarquardt, SparseJacobian};
+//! # use levenberg_marquardt_sparse::{LeastSquaresProblem, LevenbergMarquardt, SparseJacobian};
 //! struct ExampleProblem {
 //!     // holds current value of the n parameters
 //!     p: Vector2<f64>,
@@ -114,20 +114,9 @@ extern crate alloc;
 
 mod lm;
 mod problem;
-mod qr;
-mod trust_region;
 pub(crate) mod utils;
 
-pub use lm::TerminationReason;
+pub use lm::{LevenbergMarquardt, MinimizationReport, TerminationReason};
 pub use problem::{LeastSquaresProblem, SparseJacobian};
 
 pub use utils::{differentiate_holomorphic_numerically, differentiate_numerically};
-
-cfg_if::cfg_if! {
-    if #[cfg(feature="minpack-compat")] {
-        pub type LevenbergMarquardt = lm::LevenbergMarquardt<f64>;
-        pub type MinimizationReport = lm::MinimizationReport<f64>;
-    } else {
-        pub use lm::{LevenbergMarquardt, MinimizationReport};
-    }
-}

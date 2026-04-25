@@ -11,20 +11,19 @@ use num_traits::float::Float;
 // mod derivest;
 mod finite_difference;
 
-cfg_if::cfg_if! {
-    if #[cfg(feature = "RUSTC_IS_NIGHTLY")] {
-        pub use core::intrinsics::{likely, unlikely};
-    } else {
-        #[inline]
-        pub fn likely(b: bool) -> bool {
-            b
-        }
+#[cfg(feature = "RUSTC_IS_NIGHTLY")]
+pub use core::intrinsics::{likely, unlikely};
 
-        #[inline]
-        pub fn unlikely(b: bool) -> bool {
-            b
-        }
-    }
+#[cfg(not(feature = "RUSTC_IS_NIGHTLY"))]
+#[inline]
+pub fn likely(b: bool) -> bool {
+    b
+}
+
+#[cfg(not(feature = "RUSTC_IS_NIGHTLY"))]
+#[inline]
+pub fn unlikely(b: bool) -> bool {
+    b
 }
 
 /// Compute a numerical approximation of the Jacobian.
@@ -57,7 +56,7 @@ cfg_if::cfg_if! {
 /// For example:
 ///
 /// ```rust
-/// # use levenberg_marquardt::{LeastSquaresProblem, SparseJacobian, differentiate_numerically};
+/// # use levenberg_marquardt_sparse::{LeastSquaresProblem, SparseJacobian, differentiate_numerically};
 /// # use approx::assert_relative_eq;
 /// # use nalgebra::{convert, ComplexField, storage::Owned, Matrix2, Vector2, OVector, U2};
 /// #
@@ -150,7 +149,7 @@ where
 /// # Example
 ///
 /// ```rust
-/// # use levenberg_marquardt::{LeastSquaresProblem, SparseJacobian, differentiate_holomorphic_numerically};
+/// # use levenberg_marquardt_sparse::{LeastSquaresProblem, SparseJacobian, differentiate_holomorphic_numerically};
 /// # use approx::assert_relative_eq;
 /// # use nalgebra::{storage::Owned, Complex, Matrix2, Vector2, OVector, U2};
 /// use nalgebra::{ComplexField, convert};

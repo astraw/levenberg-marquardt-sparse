@@ -1,5 +1,5 @@
 use arrsac::Arrsac;
-use levenberg_marquardt::{LeastSquaresProblem, LevenbergMarquardt, SparseJacobian};
+use levenberg_marquardt_sparse::{LeastSquaresProblem, LevenbergMarquardt, SparseJacobian};
 use nalgebra::{
     Dim, Dyn, Matrix, Matrix2, OMatrix, VecStorage, Vector2,
     dimension::{U1, U2},

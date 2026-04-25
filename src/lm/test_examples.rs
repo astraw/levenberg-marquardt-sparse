@@ -9,24 +9,13 @@ use nalgebra::{allocator::Allocator, storage::Owned};
 use crate::utils::differentiate_numerically;
 use crate::{LeastSquaresProblem, LevenbergMarquardt, SparseJacobian, TerminationReason};
 
-cfg_if::cfg_if! {
-    if #[cfg(feature = "minpack-compat")] {
-        // in "minpack-compat" mode we want real equality
-        macro_rules! assert_fp_eq {
-            ($given:expr, $expected:expr) => {
-                assert_eq!($given, $expected)
-            };
-        }
-    } else {
-        macro_rules! assert_fp_eq {
-            ($given:expr, $expected:expr) => {
-                assert_relative_eq!($given, $expected, epsilon = 1e-12)
-            };
-            ($given:expr, $expected:expr, $ep:expr) => {
-                assert_relative_eq!($given, $expected, epsilon = $ep)
-            };
-        }
-    }
+macro_rules! assert_fp_eq {
+    ($given:expr, $expected:expr) => {
+        assert_relative_eq!($given, $expected, epsilon = 1e-12)
+    };
+    ($given:expr, $expected:expr, $ep:expr) => {
+        assert_relative_eq!($given, $expected, epsilon = $ep)
+    };
 }
 
 /// TOL value used by SciPy
@@ -637,10 +626,7 @@ fn test_sparse_solver_smoke() {
     let problem = LinearFullRank::new(OVector::<f64, U5>::from_element(1.0), 200);
     let (_problem, report) = LevenbergMarquardt::new()
         .with_patience(500)
-        .with_sparse_solver(true)
         .minimize(problem);
     assert!(!report.termination.was_usage_issue());
     assert!(report.objective_function.is_finite());
 }
-
-include!("test_examples_gen.rs");
