@@ -128,9 +128,11 @@ impl LeastSquaresProblem<f64, Dyn, U5> for LinearRank1 {
     fn jacobian(&self) -> Option<SparseJacobian<f64>> {
         let m = Dyn::from_usize(self.m);
         let u5 = U5;
-        Some(SparseJacobian::from_dense(OMatrix::from_fn_generic(m, u5, |i, j| {
-            ((i + 1) * (j + 1)) as f64
-        })))
+        Some(SparseJacobian::from_dense(OMatrix::from_fn_generic(
+            m,
+            u5,
+            |i, j| ((i + 1) * (j + 1)) as f64,
+        )))
     }
 }
 
@@ -189,13 +191,17 @@ impl LeastSquaresProblem<f64, Dyn, U5> for LinearRank1ZeroColumns {
     fn jacobian(&self) -> Option<SparseJacobian<f64>> {
         let m = Dyn::from_usize(self.m);
         let u5 = U5;
-        Some(SparseJacobian::from_dense(OMatrix::from_fn_generic(m, u5, |i, j| {
-            if i >= 1 && (1..5 - 1).contains(&j) && i < self.m - 1 {
-                ((j + 1) * i) as f64
-            } else {
-                0.
-            }
-        })))
+        Some(SparseJacobian::from_dense(OMatrix::from_fn_generic(
+            m,
+            u5,
+            |i, j| {
+                if i >= 1 && (1..5 - 1).contains(&j) && i < self.m - 1 {
+                    ((j + 1) * i) as f64
+                } else {
+                    0.
+                }
+            },
+        )))
     }
 }
 
@@ -223,7 +229,12 @@ impl LeastSquaresProblem<f64, U2, U2> for Rosenbruck {
     }
 
     fn jacobian(&self) -> Option<SparseJacobian<f64>> {
-        Some(SparseJacobian::from_dense(Matrix2::new(-20. * self.params[0], 10., -1., 0.)))
+        Some(SparseJacobian::from_dense(Matrix2::new(
+            -20. * self.params[0],
+            10.,
+            -1.,
+            0.,
+        )))
     }
 }
 

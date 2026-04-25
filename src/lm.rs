@@ -1,16 +1,16 @@
-use crate::{LeastSquaresProblem, SparseJacobian};
 use crate::qr::{LinearLeastSquaresDiagonalProblem, PivotedQR};
 use crate::trust_region::{LMParameter, determine_lambda_and_parameter_update};
 use crate::utils::{enorm, epsmch};
+use crate::{LeastSquaresProblem, SparseJacobian};
 use alloc::{collections::BTreeMap, vec::Vec};
-#[cfg(feature = "tracing")]
-use tracing::debug;
 use nalgebra::{
     DefaultAllocator, Dim, DimMax, DimMaximum, DimMin, OVector, RealField, Vector,
     allocator::{Allocator, Reallocator},
     convert,
 };
 use num_traits::Float;
+#[cfg(feature = "tracing")]
+use tracing::debug;
 
 #[cfg(test)]
 #[allow(
@@ -423,30 +423,23 @@ impl<F: RealField + Float> LevenbergMarquardt<F> {
 
             for _ in 0..max_inner {
                 #[cfg(feature = "tracing")]
-                { inner_tries += 1; }
+                {
+                    inner_tries += 1;
+                }
                 let step = if let Some(n_camera) = self.sparse_schur_camera_variables {
                     if n_camera > 0 && n_camera < n {
                         solve_damped_normal_equations_schur::<F, N>(
-                            &jacobian,
-                            &jt_r,
-                            &lm.diag,
-                            &col_norms,
-                            lambda,
-                            n,
-                            n_camera,
+                            &jacobian, &jt_r, &lm.diag, &col_norms, lambda, n, n_camera,
                         )
                     } else {
                         solve_damped_normal_equations::<F, N>(
-                            &jacobian,
-                            &jt_r,
-                            &lm.diag,
-                            &col_norms,
-                            lambda,
-                            n,
+                            &jacobian, &jt_r, &lm.diag, &col_norms, lambda, n,
                         )
                     }
                 } else {
-                    solve_damped_normal_equations::<F, N>(&jacobian, &jt_r, &lm.diag, &col_norms, lambda, n)
+                    solve_damped_normal_equations::<F, N>(
+                        &jacobian, &jt_r, &lm.diag, &col_norms, lambda, n,
+                    )
                 };
 
                 let pnorm = scaled_norm(&step, &lm.diag);
@@ -486,7 +479,10 @@ impl<F: RealField + Float> LevenbergMarquardt<F> {
                     if rn_sq.is_zero() {
                         F::zero()
                     } else {
-                        let r_dot_jp = residuals.as_slice().iter().zip(j_step.iter())
+                        let r_dot_jp = residuals
+                            .as_slice()
+                            .iter()
+                            .zip(j_step.iter())
                             .fold(F::zero(), |acc, (&a, &b)| acc + a * b);
                         let jp_sq = j_step.iter().fold(F::zero(), |acc, &v| acc + v * v);
                         (convert::<f64, F>(2.0) * r_dot_jp - jp_sq) / rn_sq
@@ -500,7 +496,13 @@ impl<F: RealField + Float> LevenbergMarquardt<F> {
 
                 if ratio > convert(0.0001f64) {
                     accepted = true;
-                    accepted_residuals = Some((new_residuals, new_residuals_norm, new_objective_function, step, pnorm));
+                    accepted_residuals = Some((
+                        new_residuals,
+                        new_residuals_norm,
+                        new_objective_function,
+                        step,
+                        pnorm,
+                    ));
                     #[cfg(feature = "tracing")]
                     debug!(
                         evals = lm.report.number_of_evaluations,
@@ -572,7 +574,8 @@ impl<F: RealField + Float> LevenbergMarquardt<F> {
                 return lm.into_report(TerminationReason::ResidualsZero);
             }
 
-            let xtol_check = lm.delta <= lm.config.xtol * lm.xnorm || pnorm <= lm.config.xtol * (lm.xnorm + lm.config.xtol);
+            let xtol_check = lm.delta <= lm.config.xtol * lm.xnorm
+                || pnorm <= lm.config.xtol * (lm.xnorm + lm.config.xtol);
             let ftol_check = lm.report.objective_function <= lm.config.ftol;
             if ftol_check || xtol_check {
                 return lm.into_report(TerminationReason::Converged {
@@ -685,7 +688,11 @@ where
     let mut m_inv = OVector::<F, N>::zeros_generic(Dim::from_usize(n), Dim::from_usize(1));
     for i in 0..n {
         let d = col_norms[i] * col_norms[i] + lambda * diag[i] * diag[i];
-        m_inv[i] = if d > F::default_epsilon() { F::one() / d } else { F::one() };
+        m_inv[i] = if d > F::default_epsilon() {
+            F::one() / d
+        } else {
+            F::one()
+        };
     }
 
     let mut x = OVector::<F, N>::zeros_generic(Dim::from_usize(n), Dim::from_usize(1));
@@ -693,12 +700,16 @@ where
 
     // z = M^{-1} r
     let mut z = OVector::<F, N>::zeros_generic(Dim::from_usize(n), Dim::from_usize(1));
-    for i in 0..n { z[i] = r[i] * m_inv[i]; }
+    for i in 0..n {
+        z[i] = r[i] * m_inv[i];
+    }
 
     let mut p = z.clone_owned();
     let bz0 = Float::max(jt_r.dot(&z), F::default_epsilon()); // ||b||^2 in M^{-1} norm
     let tol_sq = Float::powi(
-        Float::max(convert(1.0e-10f64), F::default_epsilon() * convert(10.0f64)), 2);
+        Float::max(convert(1.0e-10f64), F::default_epsilon() * convert(10.0f64)),
+        2,
+    );
     let mut rz_old = r.dot(&z); // r^T M^{-1} r
 
     let max_iter = 2 * n + 20;
@@ -716,7 +727,9 @@ where
 
         x.axpy(alpha, &p, F::one());
         r.axpy(-alpha, &ap, F::one());
-        for i in 0..n { z[i] = r[i] * m_inv[i]; }
+        for i in 0..n {
+            z[i] = r[i] * m_inv[i];
+        }
 
         let rz_new = r.dot(&z);
         if rz_new <= tol_sq * bz0 {
@@ -848,10 +861,16 @@ where
     F: RealField + Float + Copy,
 {
     // Jacobi preconditioner: diagonal of a
-    let m_inv: alloc::vec::Vec<F> = (0..n).map(|i| {
-        let d = a[i * n + i];
-        if d > F::default_epsilon() { F::one() / d } else { F::one() }
-    }).collect();
+    let m_inv: alloc::vec::Vec<F> = (0..n)
+        .map(|i| {
+            let d = a[i * n + i];
+            if d > F::default_epsilon() {
+                F::one() / d
+            } else {
+                F::one()
+            }
+        })
+        .collect();
 
     let mut x = alloc::vec![F::zero(); n];
     let mut r = b.to_vec();
@@ -859,7 +878,9 @@ where
     let mut p = z.clone();
     let bz0 = Float::max(dot_slice(b, &z), F::default_epsilon());
     let tol_sq = Float::powi(
-        Float::max(convert(1.0e-10f64), F::default_epsilon() * convert(10.0f64)), 2);
+        Float::max(convert(1.0e-10f64), F::default_epsilon() * convert(10.0f64)),
+        2,
+    );
     let mut rz_old = dot_slice(&r, &z);
 
     let max_iter = 2 * n + 20;

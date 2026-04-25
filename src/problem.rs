@@ -25,7 +25,11 @@ impl<F: ComplexField + Copy> SparseJacobian<F> {
 
     #[must_use]
     pub fn from_triplets(rows: usize, cols: usize, entries: Vec<(usize, usize, F)>) -> Self {
-        Self { rows, cols, entries }
+        Self {
+            rows,
+            cols,
+            entries,
+        }
     }
 
     #[must_use]
@@ -46,7 +50,11 @@ impl<F: ComplexField + Copy> SparseJacobian<F> {
                 }
             }
         }
-        Self { rows, cols, entries }
+        Self {
+            rows,
+            cols,
+            entries,
+        }
     }
 
     #[must_use]

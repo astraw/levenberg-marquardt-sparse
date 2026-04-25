@@ -100,9 +100,7 @@ cfg_if::cfg_if! {
 /// ```
 ///
 /// The `assert_relative_eq!` macro is from the `approx` crate.
-pub fn differentiate_numerically<F, N, M, O>(
-    problem: &mut O,
-) -> Option<OMatrix<F, M, N>>
+pub fn differentiate_numerically<F, N, M, O>(problem: &mut O) -> Option<OMatrix<F, M, N>>
 where
     F: RealField + Float + Copy,
     N: Dim,
