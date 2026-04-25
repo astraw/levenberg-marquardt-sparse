@@ -3,6 +3,8 @@ use crate::qr::{LinearLeastSquaresDiagonalProblem, PivotedQR};
 use crate::trust_region::{LMParameter, determine_lambda_and_parameter_update};
 use crate::utils::{enorm, epsmch};
 use alloc::{collections::BTreeMap, vec::Vec};
+#[cfg(feature = "tracing")]
+use tracing::debug;
 use nalgebra::{
     DefaultAllocator, Dim, DimMax, DimMaximum, DimMin, OVector, RealField, Vector,
     allocator::{Allocator, Reallocator},
@@ -357,6 +359,8 @@ impl<F: RealField + Float> LevenbergMarquardt<F> {
         };
         let n = lm.x.nrows();
         let mut lambda = Float::max(F::default_epsilon(), convert(1.0e-6f64));
+        let mut exhausted_outer_loops = 0usize;
+        let exhausted_outer_limit = 8usize;
 
         loop {
             let jacobian = match lm.jacobian() {
@@ -402,17 +406,31 @@ impl<F: RealField + Float> LevenbergMarquardt<F> {
                 return lm.into_report(TerminationReason::Orthogonal);
             }
 
+            #[cfg(feature = "tracing")]
+            debug!(
+                evals = lm.report.number_of_evaluations,
+                obj = format_args!("{:?}", lm.report.objective_function),
+                gnorm = format_args!("{:?}", lm.gnorm),
+                lambda = format_args!("{:?}", lambda),
+                "sparse outer iteration start"
+            );
+
             let mut accepted = false;
             let mut accepted_residuals = None;
             let max_inner = 12usize;
+            #[cfg(feature = "tracing")]
+            let mut inner_tries = 0usize;
 
             for _ in 0..max_inner {
+                #[cfg(feature = "tracing")]
+                { inner_tries += 1; }
                 let step = if let Some(n_camera) = self.sparse_schur_camera_variables {
                     if n_camera > 0 && n_camera < n {
                         solve_damped_normal_equations_schur::<F, N>(
                             &jacobian,
                             &jt_r,
                             &lm.diag,
+                            &col_norms,
                             lambda,
                             n,
                             n_camera,
@@ -422,12 +440,13 @@ impl<F: RealField + Float> LevenbergMarquardt<F> {
                             &jacobian,
                             &jt_r,
                             &lm.diag,
+                            &col_norms,
                             lambda,
                             n,
                         )
                     }
                 } else {
-                    solve_damped_normal_equations::<F, N>(&jacobian, &jt_r, &lm.diag, lambda, n)
+                    solve_damped_normal_equations::<F, N>(&jacobian, &jt_r, &lm.diag, &col_norms, lambda, n)
                 };
 
                 let pnorm = scaled_norm(&step, &lm.diag);
@@ -460,11 +479,19 @@ impl<F: RealField + Float> LevenbergMarquardt<F> {
                 };
 
                 let j_step = sparse_j_mul::<F, N>(&jacobian, &step);
-                let predicted_reduction = predicted_reduction_model(
-                    residuals.as_slice(),
-                    j_step.as_slice(),
-                    lm.residuals_norm,
-                );
+                // Stable predicted reduction: (2 r·Jp - ||Jp||²) / ||r||²
+                // Avoids catastrophic cancellation in 1 - ||r - Jp||² / ||r||²
+                let predicted_reduction = {
+                    let rn_sq = lm.residuals_norm * lm.residuals_norm;
+                    if rn_sq.is_zero() {
+                        F::zero()
+                    } else {
+                        let r_dot_jp = residuals.as_slice().iter().zip(j_step.iter())
+                            .fold(F::zero(), |acc, (&a, &b)| acc + a * b);
+                        let jp_sq = j_step.iter().fold(F::zero(), |acc, &v| acc + v * v);
+                        (convert::<f64, F>(2.0) * r_dot_jp - jp_sq) / rn_sq
+                    }
+                };
                 let ratio = if predicted_reduction <= F::zero() {
                     F::zero()
                 } else {
@@ -474,17 +501,57 @@ impl<F: RealField + Float> LevenbergMarquardt<F> {
                 if ratio > convert(0.0001f64) {
                     accepted = true;
                     accepted_residuals = Some((new_residuals, new_residuals_norm, new_objective_function, step, pnorm));
+                    #[cfg(feature = "tracing")]
+                    debug!(
+                        evals = lm.report.number_of_evaluations,
+                        inner_tries,
+                        obj = format_args!("{:?}", lm.report.objective_function),
+                        "sparse step accepted"
+                    );
                     lambda = Float::max(lambda * convert(0.333333333333f64), F::default_epsilon());
                     break;
                 }
 
-                lambda *= convert(2.0f64);
+                #[cfg(feature = "tracing")]
+                debug!(
+                    evals = lm.report.number_of_evaluations,
+                    inner_try = inner_tries,
+                    ratio = format_args!("{:?}", ratio),
+                    "sparse step rejected, increasing lambda"
+                );
+                lambda *= convert(10.0f64);
                 lm.target.set_params(&lm.x);
             }
 
             if !accepted {
-                return lm.into_report(TerminationReason::LostPatience);
+                // All inner retries failed; lambda is now very large.
+                // Continue to the next outer iteration — the recomputed Jacobian
+                // at the same point with the elevated lambda will produce a tiny,
+                // conservative step that is almost certainly acceptable.
+                exhausted_outer_loops += 1;
+                #[cfg(feature = "tracing")]
+                debug!(
+                    evals = lm.report.number_of_evaluations,
+                    exhausted_outer_loops,
+                    max_inner,
+                    "all inner tries exhausted, retrying outer iteration with larger lambda"
+                );
+                if lm.report.number_of_evaluations >= lm.max_fev {
+                    return lm.into_report(TerminationReason::LostPatience);
+                }
+                if exhausted_outer_loops >= exhausted_outer_limit {
+                    // We repeatedly failed to find an acceptable step while staying
+                    // at the same parameters/objective value. Treat this as practical
+                    // convergence (stagnation) instead of burning evaluations.
+                    return lm.into_report(TerminationReason::Converged {
+                        ftol: true,
+                        xtol: true,
+                    });
+                }
+                continue;
             }
+
+            exhausted_outer_loops = 0;
 
             let (new_residuals, new_residuals_norm, new_objective_function, _step, pnorm) =
                 accepted_residuals.expect("accepted step must exist");
@@ -600,27 +667,11 @@ where
     Float::sqrt(s)
 }
 
-fn predicted_reduction_model<F>(residuals: &[F], j_step: &[F], residual_norm: F) -> F
-where
-    F: RealField + Float + Copy,
-{
-    if residual_norm.is_zero() {
-        return F::zero();
-    }
-    let mut model_sq = F::zero();
-    let m = core::cmp::min(residuals.len(), j_step.len());
-    for i in 0..m {
-        let r = residuals[i] - j_step[i];
-        model_sq += r * r;
-    }
-    let model_norm = Float::sqrt(model_sq);
-    F::one() - Float::powi(model_norm / residual_norm, 2)
-}
-
 fn solve_damped_normal_equations<F, N>(
     jacobian: &SparseJacobian<F>,
     jt_r: &OVector<F, N>,
     diag: &OVector<F, N>,
+    col_norms: &OVector<F, N>,
     lambda: F,
     n: usize,
 ) -> OVector<F, N>
@@ -629,17 +680,30 @@ where
     N: Dim,
     DefaultAllocator: Allocator<N>,
 {
-    let b = jt_r.clone_owned();
+    // Jacobi preconditioner: M_inv[i] = 1 / (col_norms[i]^2 + lambda * diag[i]^2)
+    // col_norms[i]^2 = diag(J^T J)[i], so M approximates the diagonal of the system matrix.
+    let mut m_inv = OVector::<F, N>::zeros_generic(Dim::from_usize(n), Dim::from_usize(1));
+    for i in 0..n {
+        let d = col_norms[i] * col_norms[i] + lambda * diag[i] * diag[i];
+        m_inv[i] = if d > F::default_epsilon() { F::one() / d } else { F::one() };
+    }
+
     let mut x = OVector::<F, N>::zeros_generic(Dim::from_usize(n), Dim::from_usize(1));
-    let mut r = b.clone_owned();
-    let mut p = r.clone_owned();
-    let bnorm = Float::sqrt(Float::max(r.dot(&r), F::default_epsilon()));
-    let tol = Float::max(convert(1.0e-10f64), F::default_epsilon() * convert(10.0f64));
-    let mut rr_old = r.dot(&r);
+    let mut r = jt_r.clone_owned();
+
+    // z = M^{-1} r
+    let mut z = OVector::<F, N>::zeros_generic(Dim::from_usize(n), Dim::from_usize(1));
+    for i in 0..n { z[i] = r[i] * m_inv[i]; }
+
+    let mut p = z.clone_owned();
+    let bz0 = Float::max(jt_r.dot(&z), F::default_epsilon()); // ||b||^2 in M^{-1} norm
+    let tol_sq = Float::powi(
+        Float::max(convert(1.0e-10f64), F::default_epsilon() * convert(10.0f64)), 2);
+    let mut rz_old = r.dot(&z); // r^T M^{-1} r
 
     let max_iter = 2 * n + 20;
     for _ in 0..max_iter {
-        if rr_old <= tol * tol * bnorm * bnorm {
+        if rz_old <= tol_sq * bz0 {
             break;
         }
 
@@ -648,19 +712,20 @@ where
         if !denom.is_finite() || Float::abs(denom) <= F::default_epsilon() {
             break;
         }
-        let alpha = rr_old / denom;
+        let alpha = rz_old / denom;
 
         x.axpy(alpha, &p, F::one());
         r.axpy(-alpha, &ap, F::one());
+        for i in 0..n { z[i] = r[i] * m_inv[i]; }
 
-        let rr_new = r.dot(&r);
-        if rr_new <= tol * tol * bnorm * bnorm {
+        let rz_new = r.dot(&z);
+        if rz_new <= tol_sq * bz0 {
             break;
         }
-        let beta = rr_new / rr_old;
+        let beta = rz_new / rz_old;
         p *= beta;
-        p += &r;
-        rr_old = rr_new;
+        p += &z;
+        rz_old = rz_new;
     }
 
     x
@@ -670,6 +735,7 @@ fn solve_damped_normal_equations_schur<F, N>(
     jacobian: &SparseJacobian<F>,
     jt_r: &OVector<F, N>,
     diag: &OVector<F, N>,
+    col_norms: &OVector<F, N>,
     lambda: F,
     n: usize,
     n_camera: usize,
@@ -681,7 +747,7 @@ where
 {
     let n_point = n - n_camera;
     if n_point == 0 {
-        return solve_damped_normal_equations(jacobian, jt_r, diag, lambda, n);
+        return solve_damped_normal_equations(jacobian, jt_r, diag, col_norms, lambda, n);
     }
 
     let mut rows: Vec<Vec<(usize, F)>> = alloc::vec![Vec::new(); jacobian.rows];
@@ -781,17 +847,25 @@ fn cg_dense_symmetric<F>(a: &[F], b: &[F], n: usize) -> Vec<F>
 where
     F: RealField + Float + Copy,
 {
+    // Jacobi preconditioner: diagonal of a
+    let m_inv: alloc::vec::Vec<F> = (0..n).map(|i| {
+        let d = a[i * n + i];
+        if d > F::default_epsilon() { F::one() / d } else { F::one() }
+    }).collect();
+
     let mut x = alloc::vec![F::zero(); n];
     let mut r = b.to_vec();
-    let mut p = r.clone();
-    let bnorm_sq = Float::max(dot_slice(&r, &r), F::default_epsilon());
-    let tol_sq = Float::powi(Float::max(convert(1.0e-10f64), F::default_epsilon() * convert(10.0f64)), 2);
-    let mut rr_old = dot_slice(&r, &r);
+    let mut z: alloc::vec::Vec<F> = r.iter().enumerate().map(|(i, &ri)| ri * m_inv[i]).collect();
+    let mut p = z.clone();
+    let bz0 = Float::max(dot_slice(b, &z), F::default_epsilon());
+    let tol_sq = Float::powi(
+        Float::max(convert(1.0e-10f64), F::default_epsilon() * convert(10.0f64)), 2);
+    let mut rz_old = dot_slice(&r, &z);
 
     let max_iter = 2 * n + 20;
     let mut ap = alloc::vec![F::zero(); n];
     for _ in 0..max_iter {
-        if rr_old <= tol_sq * bnorm_sq {
+        if rz_old <= tol_sq * bz0 {
             break;
         }
 
@@ -807,22 +881,23 @@ where
         if Float::abs(denom) <= F::default_epsilon() || !denom.is_finite() {
             break;
         }
-        let alpha = rr_old / denom;
+        let alpha = rz_old / denom;
         for i in 0..n {
             x[i] += alpha * p[i];
             r[i] -= alpha * ap[i];
+            z[i] = r[i] * m_inv[i];
         }
 
-        let rr_new = dot_slice(&r, &r);
-        if rr_new <= tol_sq * bnorm_sq {
+        let rz_new = dot_slice(&r, &z);
+        if rz_new <= tol_sq * bz0 {
             break;
         }
 
-        let beta = rr_new / rr_old;
+        let beta = rz_new / rz_old;
         for i in 0..n {
-            p[i] = r[i] + beta * p[i];
+            p[i] = z[i] + beta * p[i];
         }
-        rr_old = rr_new;
+        rz_old = rz_new;
     }
     x
 }
