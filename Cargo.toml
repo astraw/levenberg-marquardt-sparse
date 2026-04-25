@@ -15,7 +15,7 @@ categories = [
     "no-std",
     "science::robotics",
 ]
-repository = "https://github.com/rust-cv/levenberg-marquardt"
+repository = "https://github.com/astraw/levenberg-marquardt-sparse"
 license = "MIT"
 readme = "README.md"
 
