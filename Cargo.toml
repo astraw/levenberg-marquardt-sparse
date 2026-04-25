@@ -1,33 +1,32 @@
 [package]
-name = "levenberg-marquardt"
-version = "0.15.0"
+name = "levenberg-marquardt-sparse"
+version = "0.1.0"
 authors = [
     "Jannik Schürg <schuerg@ins.uni-bonn.de>",
     "Geordon Worley <vadixidav@gmail.com>",
 ]
 edition = "2024"
-description = "Levenberg-Marquardt algorithm built on top of nalgebra"
-keywords = ["optimization", "optimizer", "levenberg", "marquardt", "squares"]
+description = "Sparse Levenberg-Marquardt algorithm using PCG-based normal equations, built on nalgebra"
+keywords = ["optimization", "sparse", "least-squares", "bundle-adjustment", "slam"]
 categories = [
     "algorithms",
     "computer-vision",
-    "science::robotics",
-    "no-std",
     "mathematics",
+    "no-std",
+    "science::robotics",
 ]
 repository = "https://github.com/rust-cv/levenberg-marquardt"
-documentation = "https://docs.rs/levenberg-marquardt/"
 license = "MIT"
 readme = "README.md"
 
 [features]
 default = []
-minpack-compat = []
+tracing = ["dep:tracing"]
 
 [dependencies]
 nalgebra = { version = "0.34", default-features = false }
 num-traits = { version = "0.2", default-features = false, features = ["libm"] }
-cfg-if = "1.0.1"
+tracing = { version = "0.1", default-features = false, optional = true }
 
 [dev-dependencies]
 arrsac = "0.11.0"

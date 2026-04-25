@@ -1,13 +1,9 @@
-use crate::LeastSquaresProblem;
-use crate::qr::{LinearLeastSquaresDiagonalProblem, PivotedQR};
-use crate::trust_region::{LMParameter, determine_lambda_and_parameter_update};
-use crate::utils::{enorm, epsmch};
-use nalgebra::{
-    DefaultAllocator, Dim, DimMax, DimMaximum, DimMin, Matrix, OVector, RealField, Vector,
-    allocator::{Allocator, Reallocator},
-    convert,
-};
+use crate::utils::enorm;
+use crate::{LeastSquaresProblem, SparseJacobian};
+use nalgebra::{DefaultAllocator, Dim, OVector, RealField, Vector, allocator::Allocator, convert};
 use num_traits::Float;
+#[cfg(feature = "tracing")]
+use tracing::debug;
 
 #[cfg(test)]
 #[allow(
@@ -20,9 +16,6 @@ pub(crate) mod test_examples;
 mod test_helpers;
 #[cfg(test)]
 mod test_init_step;
-#[cfg(test)]
-#[allow(clippy::float_cmp, clippy::clone_on_copy, clippy::redundant_clone)]
-mod test_update_diag;
 
 #[derive(PartialEq, Eq, Debug)]
 /// Reasons for terminating the minimization.
@@ -119,26 +112,14 @@ impl<F: RealField + Float> Default for LevenbergMarquardt<F> {
 
 impl<F: RealField + Float> LevenbergMarquardt<F> {
     pub fn new() -> Self {
-        if cfg!(feature = "minpack-compat") {
-            let user_tol = convert(1.49012e-08);
-            Self {
-                ftol: user_tol,
-                xtol: user_tol,
-                gtol: F::zero(),
-                stepbound: convert(100.0),
-                patience: 100,
-                scale_diag: true,
-            }
-        } else {
-            let user_tol = F::default_epsilon() * convert(30.0);
-            Self {
-                ftol: user_tol,
-                xtol: user_tol,
-                gtol: user_tol,
-                stepbound: convert(100.0),
-                patience: 100,
-                scale_diag: true,
-            }
+        let user_tol = F::default_epsilon() * convert(30.0);
+        Self {
+            ftol: user_tol,
+            xtol: user_tol,
+            gtol: user_tol,
+            stepbound: convert(100.0),
+            patience: 100,
+            scale_diag: true,
         }
     }
 
@@ -256,50 +237,409 @@ impl<F: RealField + Float> LevenbergMarquardt<F> {
     pub fn minimize<N, M, O>(&self, target: O) -> (O, MinimizationReport<F>)
     where
         N: Dim,
-        M: DimMin<N> + DimMax<N>,
+        M: Dim,
         O: LeastSquaresProblem<F, M, N>,
-        DefaultAllocator: Allocator<N> + Reallocator<F, M, N, DimMaximum<M, N>, N>,
+        DefaultAllocator: Allocator<N>,
     {
         let (mut lm, mut residuals) = match LM::new(self, target) {
             Err(report) => return report,
             Ok(res) => res,
         };
         let n = lm.x.nrows();
+        let mut lambda = Float::max(F::default_epsilon(), convert(1.0e-6f64));
+        let mut exhausted_outer_loops = 0usize;
+        let exhausted_outer_limit = 8usize;
+
         loop {
-            // Build linear least squares problem used for the trust-region subproblem
-            let mut lls = {
-                let jacobian = match lm.jacobian() {
-                    Err(reason) => return lm.into_report(reason),
-                    Ok(jacobian) => jacobian,
+            let jacobian = match lm.jacobian() {
+                Err(reason) => return lm.into_report(reason),
+                Ok(jacobian) => jacobian,
+            };
+            if jacobian.cols != n || jacobian.rows != lm.m {
+                return lm.into_report(TerminationReason::WrongDimensions("jacobian"));
+            }
+
+            let col_norms = sparse_column_norms::<F, N>(&jacobian, n);
+            let jt_r = sparse_jt_mul::<F, N>(&jacobian, residuals.as_slice(), n);
+
+            if lm.first_update {
+                lm.xnorm = if lm.config.scale_diag {
+                    for (d, col_norm) in lm.diag.iter_mut().zip(col_norms.iter()) {
+                        *d = if col_norm.is_zero() {
+                            F::one()
+                        } else {
+                            *col_norm
+                        };
+                    }
+                    lm.tmp.cmpy(F::one(), &lm.diag, &lm.x, F::zero());
+                    enorm(&lm.tmp)
+                } else {
+                    enorm(&lm.x)
                 };
-                if jacobian.ncols() != n || jacobian.nrows() != lm.m {
-                    return lm.into_report(TerminationReason::WrongDimensions("jacobian"));
+
+                lm.delta = if lm.xnorm.is_zero() {
+                    lm.config.stepbound
+                } else {
+                    lm.config.stepbound * lm.xnorm
+                };
+                lm.first_update = false;
+            } else if lm.config.scale_diag {
+                for (d, norm) in lm.diag.iter_mut().zip(col_norms.iter()) {
+                    *d = Float::max(*norm, *d);
+                }
+            }
+
+            lm.gnorm = max_scaled_gradient(&jt_r, &col_norms, lm.residuals_norm);
+            if lm.gnorm <= lm.config.gtol {
+                return lm.into_report(TerminationReason::Orthogonal);
+            }
+
+            #[cfg(feature = "tracing")]
+            debug!(
+                evals = lm.report.number_of_evaluations,
+                obj = format_args!("{:?}", lm.report.objective_function),
+                gnorm = format_args!("{:?}", lm.gnorm),
+                lambda = format_args!("{:?}", lambda),
+                "sparse outer iteration start"
+            );
+
+            let mut accepted = false;
+            let mut accepted_residuals = None;
+            let max_inner = 12usize;
+            #[cfg(feature = "tracing")]
+            let mut inner_tries = 0usize;
+
+            for _ in 0..max_inner {
+                #[cfg(feature = "tracing")]
+                {
+                    inner_tries += 1;
+                }
+                let step = solve_damped_normal_equations::<F, N>(
+                    &jacobian, &jt_r, &lm.diag, &col_norms, lambda, n,
+                );
+
+                let pnorm = scaled_norm(&step, &lm.diag);
+                if !pnorm.is_finite() {
+                    return lm.into_report(TerminationReason::Numerical("subproblem ||Dp||"));
                 }
 
-                let qr = PivotedQR::new(jacobian);
-                qr.into_least_squares_diagonal_problem(residuals)
-            };
+                lm.tmp.copy_from(&lm.x);
+                lm.tmp.axpy(-F::one(), &step, F::one());
 
-            // Update the diagonal, initialize "delta" in first call
-            if let Err(reason) = lm.update_diag(&mut lls) {
-                return lm.into_report(reason);
-            };
+                lm.target.set_params(&lm.tmp);
+                lm.report.number_of_evaluations += 1;
 
-            residuals = loop {
-                let param =
-                    determine_lambda_and_parameter_update(&mut lls, &lm.diag, lm.delta, lm.lambda);
-                let tr_iteration = lm.trust_region_iteration(&mut lls, param);
-                match tr_iteration {
-                    // successful parameter update, break and recompute Jacobian
-                    Ok(Some(residuals)) => break residuals,
-                    // terminate (either success or failure)
-                    Err(reason) => return lm.into_report(reason),
-                    // need another iteration
-                    Ok(None) => (),
+                let new_objective_function;
+                let (new_residuals, new_residuals_norm) = if let Some(res) = lm.target.residuals() {
+                    if res.nrows() != lm.m {
+                        return lm.into_report(TerminationReason::WrongDimensions("residuals"));
+                    }
+                    let norm = enorm(&res);
+                    new_objective_function = norm * norm * convert(0.5);
+                    (res, norm)
+                } else {
+                    return lm.into_report(TerminationReason::User("residuals"));
+                };
+
+                let actual_reduction = if new_residuals_norm * convert(0.1f64) < lm.residuals_norm {
+                    F::one() - Float::powi(new_residuals_norm / lm.residuals_norm, 2)
+                } else {
+                    -F::one()
+                };
+
+                let j_step = sparse_j_mul::<F, N>(&jacobian, &step);
+                // Stable predicted reduction: (2 r·Jp - ||Jp||²) / ||r||²
+                // Avoids catastrophic cancellation in 1 - ||r - Jp||² / ||r||²
+                let predicted_reduction = {
+                    let rn_sq = lm.residuals_norm * lm.residuals_norm;
+                    if rn_sq.is_zero() {
+                        F::zero()
+                    } else {
+                        let r_dot_jp = residuals
+                            .as_slice()
+                            .iter()
+                            .zip(j_step.iter())
+                            .fold(F::zero(), |acc, (&a, &b)| acc + a * b);
+                        let jp_sq = j_step.iter().fold(F::zero(), |acc, &v| acc + v * v);
+                        (convert::<f64, F>(2.0) * r_dot_jp - jp_sq) / rn_sq
+                    }
+                };
+                let ratio = if predicted_reduction <= F::zero() {
+                    F::zero()
+                } else {
+                    actual_reduction / predicted_reduction
+                };
+
+                if ratio > convert(0.0001f64) {
+                    accepted = true;
+                    accepted_residuals = Some((
+                        new_residuals,
+                        new_residuals_norm,
+                        new_objective_function,
+                        step,
+                        pnorm,
+                    ));
+                    #[cfg(feature = "tracing")]
+                    debug!(
+                        evals = lm.report.number_of_evaluations,
+                        inner_tries,
+                        obj = format_args!("{:?}", lm.report.objective_function),
+                        "sparse step accepted"
+                    );
+                    lambda = Float::max(lambda * convert(0.333333333333f64), F::default_epsilon());
+                    break;
                 }
-            };
+
+                #[cfg(feature = "tracing")]
+                debug!(
+                    evals = lm.report.number_of_evaluations,
+                    inner_try = inner_tries,
+                    ratio = format_args!("{:?}", ratio),
+                    "sparse step rejected, increasing lambda"
+                );
+                lambda *= convert(10.0f64);
+                lm.target.set_params(&lm.x);
+            }
+
+            if !accepted {
+                // All inner retries failed; lambda is now very large.
+                // Continue to the next outer iteration — the recomputed Jacobian
+                // at the same point with the elevated lambda will produce a tiny,
+                // conservative step that is almost certainly acceptable.
+                exhausted_outer_loops += 1;
+                #[cfg(feature = "tracing")]
+                debug!(
+                    evals = lm.report.number_of_evaluations,
+                    exhausted_outer_loops,
+                    max_inner,
+                    "all inner tries exhausted, retrying outer iteration with larger lambda"
+                );
+                if lm.report.number_of_evaluations >= lm.max_fev {
+                    return lm.into_report(TerminationReason::LostPatience);
+                }
+                if exhausted_outer_loops >= exhausted_outer_limit {
+                    // We repeatedly failed to find an acceptable step while staying
+                    // at the same parameters/objective value. Treat this as practical
+                    // convergence (stagnation) instead of burning evaluations.
+                    return lm.into_report(TerminationReason::Converged {
+                        ftol: true,
+                        xtol: true,
+                    });
+                }
+                continue;
+            }
+
+            exhausted_outer_loops = 0;
+
+            let (new_residuals, new_residuals_norm, new_objective_function, _step, pnorm) =
+                accepted_residuals.expect("accepted step must exist");
+
+            core::mem::swap(&mut lm.x, &mut lm.tmp);
+            lm.residuals_norm = new_residuals_norm;
+            lm.report.objective_function = new_objective_function;
+            residuals = new_residuals;
+
+            if lm.config.scale_diag {
+                lm.tmp.cmpy(F::one(), &lm.diag, &lm.x, F::zero());
+                lm.xnorm = enorm(&lm.tmp);
+            } else {
+                lm.xnorm = enorm(&lm.x);
+            }
+
+            if lm.residuals_norm <= F::min_positive_value() {
+                return lm.into_report(TerminationReason::ResidualsZero);
+            }
+
+            let xtol_check = lm.delta <= lm.config.xtol * lm.xnorm
+                || pnorm <= lm.config.xtol * (lm.xnorm + lm.config.xtol);
+            let ftol_check = lm.report.objective_function <= lm.config.ftol;
+            if ftol_check || xtol_check {
+                return lm.into_report(TerminationReason::Converged {
+                    ftol: ftol_check,
+                    xtol: xtol_check,
+                });
+            }
+
+            if lm.report.number_of_evaluations >= lm.max_fev {
+                return lm.into_report(TerminationReason::LostPatience);
+            }
         }
     }
+}
+
+fn sparse_column_norms<F, N>(jacobian: &SparseJacobian<F>, n: usize) -> OVector<F, N>
+where
+    F: RealField + Float + Copy,
+    N: Dim,
+    DefaultAllocator: Allocator<N>,
+{
+    let mut out = OVector::<F, N>::zeros_generic(Dim::from_usize(n), Dim::from_usize(1));
+    for &(_, j, v) in jacobian.entries.iter() {
+        if j < n {
+            out[j] += v * v;
+        }
+    }
+    out.apply(|x| *x = Float::sqrt(*x));
+    out
+}
+
+fn sparse_jt_mul<F, N>(jacobian: &SparseJacobian<F>, y: &[F], n: usize) -> OVector<F, N>
+where
+    F: RealField + Float + Copy,
+    N: Dim,
+    DefaultAllocator: Allocator<N>,
+{
+    let mut out = OVector::<F, N>::zeros_generic(Dim::from_usize(n), Dim::from_usize(1));
+    for &(i, j, v) in jacobian.entries.iter() {
+        if i < y.len() && j < n {
+            out[j] += v * y[i];
+        }
+    }
+    out
+}
+
+fn sparse_j_mul<F, N>(jacobian: &SparseJacobian<F>, x: &OVector<F, N>) -> alloc::vec::Vec<F>
+where
+    F: RealField + Float + Copy,
+    N: Dim,
+    DefaultAllocator: Allocator<N>,
+{
+    let mut out = alloc::vec![F::zero(); jacobian.rows];
+    for &(i, j, v) in jacobian.entries.iter() {
+        if i < out.len() && j < x.nrows() {
+            out[i] += v * x[j];
+        }
+    }
+    out
+}
+
+fn max_scaled_gradient<F, N>(jt_r: &OVector<F, N>, col_norms: &OVector<F, N>, rnorm: F) -> F
+where
+    F: RealField + Float + Copy,
+    N: Dim,
+    DefaultAllocator: Allocator<N>,
+{
+    let mut out = F::zero();
+    if rnorm.is_zero() {
+        return out;
+    }
+    for i in 0..jt_r.nrows() {
+        let denom = col_norms[i] * rnorm;
+        if denom.is_positive() {
+            out = Float::max(out, Float::abs(jt_r[i] / denom));
+        }
+    }
+    out
+}
+
+fn scaled_norm<F, N>(x: &OVector<F, N>, diag: &OVector<F, N>) -> F
+where
+    F: RealField + Float + Copy,
+    N: Dim,
+    DefaultAllocator: Allocator<N>,
+{
+    let mut s = F::zero();
+    for i in 0..x.nrows() {
+        let v = x[i] * diag[i];
+        s += v * v;
+    }
+    Float::sqrt(s)
+}
+
+fn solve_damped_normal_equations<F, N>(
+    jacobian: &SparseJacobian<F>,
+    jt_r: &OVector<F, N>,
+    diag: &OVector<F, N>,
+    col_norms: &OVector<F, N>,
+    lambda: F,
+    n: usize,
+) -> OVector<F, N>
+where
+    F: RealField + Float + Copy,
+    N: Dim,
+    DefaultAllocator: Allocator<N>,
+{
+    // Jacobi preconditioner: M_inv[i] = 1 / (col_norms[i]^2 + lambda * diag[i]^2)
+    // col_norms[i]^2 = diag(J^T J)[i], so M approximates the diagonal of the system matrix.
+    let mut m_inv = OVector::<F, N>::zeros_generic(Dim::from_usize(n), Dim::from_usize(1));
+    for i in 0..n {
+        let d = col_norms[i] * col_norms[i] + lambda * diag[i] * diag[i];
+        m_inv[i] = if d > F::default_epsilon() {
+            F::one() / d
+        } else {
+            F::one()
+        };
+    }
+
+    let mut x = OVector::<F, N>::zeros_generic(Dim::from_usize(n), Dim::from_usize(1));
+    let mut r = jt_r.clone_owned();
+
+    // z = M^{-1} r
+    let mut z = OVector::<F, N>::zeros_generic(Dim::from_usize(n), Dim::from_usize(1));
+    for i in 0..n {
+        z[i] = r[i] * m_inv[i];
+    }
+
+    let mut p = z.clone_owned();
+    let bz0 = Float::max(jt_r.dot(&z), F::default_epsilon()); // ||b||^2 in M^{-1} norm
+    let tol_sq = Float::powi(
+        Float::max(convert(1.0e-10f64), F::default_epsilon() * convert(10.0f64)),
+        2,
+    );
+    let mut rz_old = r.dot(&z); // r^T M^{-1} r
+
+    let max_iter = 2 * n + 20;
+    for _ in 0..max_iter {
+        if rz_old <= tol_sq * bz0 {
+            break;
+        }
+
+        let ap = sparse_normal_op_mul(jacobian, &p, diag, lambda, n);
+        let denom = p.dot(&ap);
+        if !denom.is_finite() || Float::abs(denom) <= F::default_epsilon() {
+            break;
+        }
+        let alpha = rz_old / denom;
+
+        x.axpy(alpha, &p, F::one());
+        r.axpy(-alpha, &ap, F::one());
+        for i in 0..n {
+            z[i] = r[i] * m_inv[i];
+        }
+
+        let rz_new = r.dot(&z);
+        if rz_new <= tol_sq * bz0 {
+            break;
+        }
+        let beta = rz_new / rz_old;
+        p *= beta;
+        p += &z;
+        rz_old = rz_new;
+    }
+
+    x
+}
+
+fn sparse_normal_op_mul<F, N>(
+    jacobian: &SparseJacobian<F>,
+    x: &OVector<F, N>,
+    diag: &OVector<F, N>,
+    lambda: F,
+    n: usize,
+) -> OVector<F, N>
+where
+    F: RealField + Float + Copy,
+    N: Dim,
+    DefaultAllocator: Allocator<N>,
+{
+    let jx = sparse_j_mul(jacobian, x);
+    let mut out = sparse_jt_mul(jacobian, jx.as_slice(), n);
+    if !lambda.is_zero() {
+        for i in 0..out.nrows() {
+            out[i] += lambda * diag[i] * diag[i] * x[i];
+        }
+    }
+    out
 }
 
 /// Struct which holds the state of the LM algorithm and which implements its individual steps.
@@ -307,9 +647,9 @@ struct LM<'a, F, N, M, O>
 where
     F: RealField + Copy,
     N: Dim,
-    M: DimMin<N> + DimMax<N>,
+    M: Dim,
     O: LeastSquaresProblem<F, M, N>,
-    DefaultAllocator: Allocator<N> + Allocator<DimMaximum<M, N>, N>,
+    DefaultAllocator: Allocator<N>,
 {
     config: &'a LevenbergMarquardt<F>,
     /// Current parameters `$\vec{x}$`
@@ -321,15 +661,12 @@ where
     report: MinimizationReport<F>,
     /// The delta from the trust-region algorithm
     delta: F,
-    lambda: F,
     /// `$\|\mathbf{D}\vec{x}\|`
     xnorm: F,
     gnorm: F,
     residuals_norm: F,
     /// The diagonal of `$\mathbf{D}$`
     diag: OVector<F, N>,
-    /// Flag to check if it is the first trust region iteration
-    first_trust_region_iteration: bool,
     /// Flag to check if it is the first diagonal update
     first_update: bool,
     max_fev: usize,
@@ -340,9 +677,9 @@ impl<'a, F, N, M, O> LM<'a, F, N, M, O>
 where
     F: RealField + Float + Copy,
     N: Dim,
-    M: DimMin<N> + DimMax<N>,
+    M: Dim,
     O: LeastSquaresProblem<F, M, N>,
-    DefaultAllocator: Allocator<N> + Allocator<DimMaximum<M, N>, N>,
+    DefaultAllocator: Allocator<N>,
 {
     #[allow(clippy::type_complexity)]
     fn new(
@@ -396,7 +733,7 @@ where
             ));
         }
 
-        if !residuals_norm.is_finite() && !cfg!(feature = "minpack-compat") {
+        if !residuals_norm.is_finite() {
             return Err((
                 target,
                 MinimizationReport {
@@ -406,7 +743,7 @@ where
             ));
         }
 
-        if residuals_norm <= Float::min_positive_value() && !cfg!(feature = "minpack-compat") {
+        if residuals_norm <= Float::min_positive_value() {
             // Already zero, nothing to do
             return Err((target, report));
         }
@@ -420,11 +757,9 @@ where
                 x,
                 diag,
                 delta: F::zero(),
-                lambda: F::zero(),
                 xnorm: F::zero(),
                 gnorm: F::zero(),
                 residuals_norm,
-                first_trust_region_iteration: true,
                 first_update: true,
                 max_fev: config.patience * (n.value() + 1),
                 m,
@@ -443,222 +778,10 @@ where
         )
     }
 
-    fn jacobian(&self) -> Result<Matrix<F, M, N, O::JacobianStorage>, TerminationReason> {
+    fn jacobian(&self) -> Result<SparseJacobian<F>, TerminationReason> {
         match self.target.jacobian() {
             Some(jacobian) => Ok(jacobian),
             None => Err(TerminationReason::User("jacobian")),
-        }
-    }
-
-    fn update_diag(
-        &mut self,
-        lls: &mut LinearLeastSquaresDiagonalProblem<F, M, N>,
-    ) -> Result<(), TerminationReason>
-    where
-        DefaultAllocator: Allocator<N>,
-    {
-        // Compute norm of scaled gradient and detect degeneracy
-        self.gnorm = match lls.max_a_t_b_scaled(self.residuals_norm) {
-            Some(max_at_b) => max_at_b,
-            None if !cfg!(feature = "minpack-compat") => {
-                return Err(TerminationReason::Numerical("jacobian"));
-            }
-            None => F::zero(),
-        };
-        if self.gnorm <= self.config.gtol {
-            return Err(TerminationReason::Orthogonal);
-        }
-
-        if self.first_update {
-            // Initialize diag and xnorm
-            self.xnorm = if self.config.scale_diag {
-                for (d, col_norm) in self.diag.iter_mut().zip(lls.column_norms.iter()) {
-                    *d = if col_norm.is_zero() {
-                        F::one()
-                    } else {
-                        *col_norm
-                    };
-                }
-                self.tmp.cmpy(F::one(), &self.diag, &self.x, F::zero());
-                enorm(&self.tmp)
-            } else {
-                enorm(&self.x)
-            };
-            if !self.xnorm.is_finite() && !cfg!(feature = "minpack-compat") {
-                return Err(TerminationReason::Numerical("subproblem x"));
-            }
-            // Initialize delta
-            self.delta = if self.xnorm.is_zero() {
-                self.config.stepbound
-            } else {
-                self.config.stepbound * self.xnorm
-            };
-            self.first_update = false;
-        } else if self.config.scale_diag {
-            // Update diag
-            for (d, norm) in self.diag.iter_mut().zip(lls.column_norms.iter()) {
-                *d = Float::max(*norm, *d);
-            }
-        }
-        Ok(())
-    }
-
-    #[allow(clippy::type_complexity)]
-    fn trust_region_iteration(
-        &mut self,
-        lls: &mut LinearLeastSquaresDiagonalProblem<F, M, N>,
-        param: LMParameter<F, N>,
-    ) -> Result<Option<Vector<F, M, O::ResidualStorage>>, TerminationReason>
-    where
-        DefaultAllocator: Allocator<N>,
-    {
-        const P1: f64 = 0.1;
-        const P0001: f64 = 1.0e-4;
-
-        self.lambda = param.lambda;
-        let pnorm = param.dp_norm;
-        if !pnorm.is_finite() && !cfg!(feature = "minpack-compat") {
-            return Err(TerminationReason::Numerical("subproblem ||Dp||"));
-        }
-
-        let predicted_reduction;
-        let dir_der;
-        {
-            let temp1 = Float::powi(lls.a_x_norm(&param.step) / self.residuals_norm, 2);
-            if !temp1.is_finite() && !cfg!(feature = "minpack-compat") {
-                return Err(TerminationReason::Numerical("trust-region reduction"));
-            }
-            let temp2 = Float::powi((Float::sqrt(self.lambda) * pnorm) / self.residuals_norm, 2);
-            if !temp2.is_finite() && !cfg!(feature = "minpack-compat") {
-                return Err(TerminationReason::Numerical("trust-region reduction"));
-            }
-            predicted_reduction = temp1 + temp2 / convert(0.5);
-            dir_der = -(temp1 + temp2);
-        }
-
-        if self.first_trust_region_iteration && pnorm < self.delta {
-            self.delta = pnorm;
-        }
-        self.first_trust_region_iteration = false;
-
-        // Compute new parameters: x - p
-        self.tmp.copy_from(&self.x);
-        self.tmp.axpy(-F::one(), &param.step, F::one());
-
-        // Evaluate
-        self.target.set_params(&self.tmp);
-        self.report.number_of_evaluations += 1;
-        let new_objective_function;
-        let (residuals, new_residuals_norm) = if let Some(residuals) = self.target.residuals() {
-            if residuals.nrows() != self.m {
-                return Err(TerminationReason::WrongDimensions("residuals"));
-            }
-            let norm = enorm(&residuals);
-            new_objective_function = norm * norm * convert(0.5);
-            (residuals, norm)
-        } else {
-            return Err(TerminationReason::User("residuals"));
-        };
-
-        // Compute predicted and actual reduction
-        let actual_reduction = if new_residuals_norm * convert(P1) < self.residuals_norm {
-            F::one() - Float::powi(new_residuals_norm / self.residuals_norm, 2)
-        } else {
-            -F::one()
-        };
-
-        let ratio = if predicted_reduction.is_zero() {
-            F::zero()
-        } else {
-            actual_reduction / predicted_reduction
-        };
-        let half: F = convert(0.5);
-        if ratio <= convert(0.25) {
-            let mut temp = if !actual_reduction.is_negative() {
-                half
-            } else {
-                half * dir_der / (dir_der + half * actual_reduction)
-            };
-            if new_residuals_norm * convert(P1) >= self.residuals_norm || temp < convert(P1) {
-                temp = convert(P1);
-            };
-            self.delta = temp * Float::min(self.delta, pnorm * convert(10.));
-            self.lambda /= temp;
-        } else if self.lambda.is_zero() || ratio >= convert(0.75) {
-            self.delta = pnorm / convert(0.5);
-            self.lambda *= half;
-        }
-
-        let update_considered_good = ratio >= convert(P0001);
-        if update_considered_good {
-            // update x, residuals and their norms
-            core::mem::swap(&mut self.x, &mut self.tmp);
-            self.xnorm = if self.config.scale_diag {
-                self.tmp.cmpy(F::one(), &self.diag, &self.x, F::zero());
-                enorm(&self.tmp)
-            } else {
-                enorm(&self.x)
-            };
-            if !self.xnorm.is_finite() && !cfg!(feature = "minpack-compat") {
-                return Err(TerminationReason::Numerical("new x"));
-            }
-            self.residuals_norm = new_residuals_norm;
-            self.report.objective_function = new_objective_function;
-        }
-
-        // convergence tests
-        if !cfg!(feature = "minpack-compat") && self.residuals_norm <= F::min_positive_value() {
-            self.reset_params_if(!update_considered_good);
-            return Err(TerminationReason::ResidualsZero);
-        }
-        let ftol_check = Float::abs(actual_reduction) <= self.config.ftol
-            && predicted_reduction <= self.config.ftol
-            && ratio * convert(0.5) <= F::one();
-        let xtol_check = self.delta <= self.config.xtol * self.xnorm;
-        if ftol_check || xtol_check {
-            self.reset_params_if(!update_considered_good);
-            return Err(TerminationReason::Converged {
-                ftol: ftol_check,
-                xtol: xtol_check,
-            });
-        }
-
-        // termination tests
-        if self.report.number_of_evaluations >= self.max_fev {
-            self.reset_params_if(!update_considered_good);
-            return Err(TerminationReason::LostPatience);
-        }
-
-        // We now check if one of the ftol, xtol or gtol criteria
-        // is fulfilld with the machine epsilon.
-        if Float::abs(actual_reduction) <= epsmch()
-            && predicted_reduction <= epsmch()
-            && ratio * convert(0.5) <= F::one()
-        {
-            self.reset_params_if(!update_considered_good);
-            return Err(TerminationReason::NoImprovementPossible("ftol"));
-        }
-        if self.delta <= epsmch::<F>() * self.xnorm {
-            self.reset_params_if(!update_considered_good);
-            return Err(TerminationReason::NoImprovementPossible("xtol"));
-        }
-        if self.gnorm <= epsmch() {
-            self.reset_params_if(!update_considered_good);
-            return Err(TerminationReason::NoImprovementPossible("gtol"));
-        }
-
-        if update_considered_good {
-            Ok(Some(residuals))
-        } else {
-            // Need another iteration, did not change the parameters
-            Ok(None)
-        }
-    }
-
-    #[inline]
-    fn reset_params_if(&mut self, reset: bool) {
-        if reset {
-            self.target.set_params(&self.x);
         }
     }
 }

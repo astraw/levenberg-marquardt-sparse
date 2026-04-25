@@ -5,7 +5,7 @@ authors = ["Geordon Worley <vadixidav@gmail.com>"]
 edition = "2018"
 
 [dependencies]
-levenberg-marquardt = { path = ".." }
+levenberg-marquardt-sparse = { path = ".." }
 
 [profile.dev]
 panic = "abort"

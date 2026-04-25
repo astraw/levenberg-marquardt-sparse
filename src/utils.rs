@@ -3,7 +3,7 @@ use crate::LeastSquaresProblem;
 use alloc::{format, string::String};
 use core::cell::RefCell;
 use nalgebra::{
-    Complex, ComplexField, DefaultAllocator, Dim, Matrix, OMatrix, RealField, U1, Vector,
+    Complex, ComplexField, DefaultAllocator, Dim, OMatrix, RealField, U1, Vector,
     allocator::Allocator, convert, storage::RawStorage, storage::Storage,
 };
 use num_traits::float::Float;
@@ -11,20 +11,19 @@ use num_traits::float::Float;
 // mod derivest;
 mod finite_difference;
 
-cfg_if::cfg_if! {
-    if #[cfg(feature = "RUSTC_IS_NIGHTLY")] {
-        pub use core::intrinsics::{likely, unlikely};
-    } else {
-        #[inline]
-        pub fn likely(b: bool) -> bool {
-            b
-        }
+#[cfg(feature = "RUSTC_IS_NIGHTLY")]
+pub use core::intrinsics::{likely, unlikely};
 
-        #[inline]
-        pub fn unlikely(b: bool) -> bool {
-            b
-        }
-    }
+#[cfg(not(feature = "RUSTC_IS_NIGHTLY"))]
+#[inline]
+pub fn likely(b: bool) -> bool {
+    b
+}
+
+#[cfg(not(feature = "RUSTC_IS_NIGHTLY"))]
+#[inline]
+pub fn unlikely(b: bool) -> bool {
+    b
 }
 
 /// Compute a numerical approximation of the Jacobian.
@@ -57,7 +56,7 @@ cfg_if::cfg_if! {
 /// For example:
 ///
 /// ```rust
-/// # use levenberg_marquardt::{LeastSquaresProblem, differentiate_numerically};
+/// # use levenberg_marquardt_sparse::{LeastSquaresProblem, SparseJacobian, differentiate_numerically};
 /// # use approx::assert_relative_eq;
 /// # use nalgebra::{convert, ComplexField, storage::Owned, Matrix2, Vector2, OVector, U2};
 /// #
@@ -68,7 +67,6 @@ cfg_if::cfg_if! {
 /// # impl<F: ComplexField + Copy> LeastSquaresProblem<F, U2, U2> for ExampleProblem<F> {
 /// #     type ParameterStorage = Owned<F, U2>;
 /// #     type ResidualStorage = Owned<F, U2>;
-/// #     type JacobianStorage = Owned<F, U2, U2>;
 /// #
 /// #     fn set_params(&mut self, p: &OVector<F, U2>) {
 /// #         self.p.copy_from(p);
@@ -83,41 +81,38 @@ cfg_if::cfg_if! {
 /// #         ))
 /// #     }
 /// #
-/// #     fn jacobian(&self) -> Option<Matrix2<F>> {
+/// #     fn jacobian(&self) -> Option<SparseJacobian<F>> {
 /// #         let two: F = convert(2.);
-/// #         Some(Matrix2::new(
+/// #         Some(SparseJacobian::from_dense(Matrix2::new(
 /// #             two * self.p.x,
 /// #             F::one(),
 /// #             F::one(),
 /// #             two * self.p.y,
-/// #         ))
+/// #         )))
 /// #     }
 /// # }
 /// // Let `problem` be an instance of `LeastSquaresProblem`
 /// # let mut problem = ExampleProblem::<f64> { p: Vector2::new(6., -10.), };
 /// let jacobian_numerical = differentiate_numerically(&mut problem).unwrap();
-/// let jacobian_trait = problem.jacobian().unwrap();
+/// let jacobian_trait = problem.jacobian().unwrap().to_dense::<_, _>();
 /// assert_relative_eq!(jacobian_numerical, jacobian_trait, epsilon = 1e-13);
 /// ```
 ///
 /// The `assert_relative_eq!` macro is from the `approx` crate.
-pub fn differentiate_numerically<F, N, M, O>(
-    problem: &mut O,
-) -> Option<Matrix<F, M, N, O::JacobianStorage>>
+pub fn differentiate_numerically<F, N, M, O>(problem: &mut O) -> Option<OMatrix<F, M, N>>
 where
     F: RealField + Float + Copy,
     N: Dim,
     M: Dim,
     O: LeastSquaresProblem<F, M, N>,
-    O::JacobianStorage: Clone,
-    DefaultAllocator: Allocator<M, N, Buffer<F> = O::JacobianStorage>,
+    DefaultAllocator: Allocator<M, N>,
 {
     let params = problem.params();
     let n = params.data.shape().0;
     let m = problem.residuals()?.data.shape().0;
     let params = RefCell::new(params);
     let problem = RefCell::new(problem);
-    let mut jacobian = Matrix::<F, M, N, O::JacobianStorage>::zeros_generic(m, n);
+    let mut jacobian = OMatrix::<F, M, N>::zeros_generic(m, n);
     for j in 0..n.value() {
         let x = params.borrow()[j];
         for i in 0..m.value() {
@@ -154,7 +149,7 @@ where
 /// # Example
 ///
 /// ```rust
-/// # use levenberg_marquardt::{LeastSquaresProblem, differentiate_holomorphic_numerically};
+/// # use levenberg_marquardt_sparse::{LeastSquaresProblem, SparseJacobian, differentiate_holomorphic_numerically};
 /// # use approx::assert_relative_eq;
 /// # use nalgebra::{storage::Owned, Complex, Matrix2, Vector2, OVector, U2};
 /// use nalgebra::{ComplexField, convert};
@@ -168,7 +163,6 @@ where
 ///     // ... omitted ...
 /// #     type ParameterStorage = Owned<F, U2>;
 /// #     type ResidualStorage = Owned<F, U2>;
-/// #     type JacobianStorage = Owned<F, U2, U2>;
 /// #
 /// #     fn set_params(&mut self, params: &OVector<F, U2>) {
 /// #         self.params.copy_from(params);
@@ -183,14 +177,14 @@ where
 /// #         ))
 /// #     }
 /// #
-/// #     fn jacobian(&self) -> Option<Matrix2<F>> {
+/// #     fn jacobian(&self) -> Option<SparseJacobian<F>> {
 /// #         let two: F = convert(2.);
-/// #         Some(Matrix2::new(
+/// #         Some(SparseJacobian::from_dense(Matrix2::new(
 /// #             two * self.params.x,
 /// #             F::one(),
 /// #             F::one(),
 /// #             two * self.params.y,
-/// #         ))
+/// #         )))
 /// #     }
 /// }
 ///
@@ -198,7 +192,10 @@ where
 /// let x = Vector2::new(0.03877264483558185, -0.7734472300384164);
 ///
 /// // instantiate f64 variant to compute the derivative we want to check
-/// let jacobian_from_trait = (ExampleProblem::<f64> { params: x }).jacobian().unwrap();
+/// let jacobian_from_trait = (ExampleProblem::<f64> { params: x })
+///     .jacobian()
+///     .unwrap()
+///     .to_dense::<_, _>();
 ///
 /// // then use Complex<f64> and compute the numerical derivative
 /// let jacobian_numerically = {
@@ -243,33 +240,13 @@ where
 }
 
 #[inline]
-#[allow(clippy::unreadable_literal)]
-pub(crate) fn epsmch<F: RealField>() -> F {
-    if cfg!(feature = "minpack-compat") {
-        convert(2.22044604926e-16f64)
-    } else {
-        F::default_epsilon()
-    }
-}
-
-#[inline]
-#[allow(clippy::unreadable_literal)]
 pub(crate) fn giant<F: Float>() -> F {
-    if cfg!(feature = "minpack-compat") {
-        F::from(1.79769313485e+308f64).unwrap()
-    } else {
-        F::max_value()
-    }
+    F::max_value()
 }
 
 #[inline]
-#[allow(clippy::unreadable_literal)]
 pub(crate) fn dwarf<F: Float>() -> F {
-    if cfg!(feature = "minpack-compat") {
-        F::from(2.22507385852e-308f64).unwrap()
-    } else {
-        F::min_positive_value()
-    }
+    F::min_positive_value()
 }
 
 #[inline]
@@ -284,16 +261,8 @@ where
     let mut s3 = F::zero();
     let mut x1max = F::zero();
     let mut x3max = F::zero();
-    let agiant = if cfg!(feature = "minpack-compat") {
-        convert(1.304e19f64)
-    } else {
-        Float::sqrt(giant::<F>())
-    } / convert(v.nrows() as f64);
-    let rdwarf = if cfg!(feature = "minpack-compat") {
-        convert(3.834e-20f64)
-    } else {
-        Float::sqrt(dwarf())
-    };
+    let agiant = Float::sqrt(giant::<F>()) / convert(v.nrows() as f64);
+    let rdwarf = Float::sqrt(dwarf());
     for xi in v.iter() {
         let xabs = xi.abs();
         if unlikely(xabs.is_nan()) {
@@ -333,25 +302,6 @@ where
     } else {
         x3max * Float::sqrt(s3)
     }
-}
-
-#[inline]
-/// Dot product between two vectors
-pub(crate) fn dot<F, N, AS, BS>(a: &Vector<F, N, AS>, b: &Vector<F, N, BS>) -> F
-where
-    F: nalgebra::RealField + Copy,
-    N: Dim,
-    AS: Storage<F, N, U1>,
-    BS: Storage<F, N, U1>,
-{
-    // To achieve floating point equality with MINPACK
-    // the dot product implementation from nalgebra must not
-    // be used.
-    let mut dot = F::zero();
-    for (x, y) in a.iter().zip(b.iter()) {
-        dot += *x * *y;
-    }
-    dot
 }
 
 #[allow(dead_code)]
@@ -399,7 +349,7 @@ fn test_linear_case() {
     x[2] = -10.;
     let mut problem = LinearFullRank { params: x, m: 6 };
     let jac_num = differentiate_numerically(&mut problem).unwrap();
-    let jac_trait = problem.jacobian().unwrap();
+    let jac_trait = problem.jacobian().unwrap().to_dense::<nalgebra::Dyn, U5>();
     assert_relative_eq!(jac_num, jac_trait, epsilon = 1e-12);
 }
 
@@ -414,7 +364,6 @@ fn test_reset_parameters() {
     impl LeastSquaresProblem<f64, U2, U2> for AllButOne {
         type ParameterStorage = Owned<f64, U2>;
         type ResidualStorage = Owned<f64, U2>;
-        type JacobianStorage = Owned<f64, U2, U2>;
 
         fn set_params(&mut self, params: &OVector<f64, U2>) {
             self.params.copy_from(params);
@@ -429,17 +378,17 @@ fn test_reset_parameters() {
         }
 
         #[rustfmt::skip]
-        fn jacobian(&self) -> Option<OMatrix<f64, U2, U2>> {
-            Some(Matrix2::new(
+        fn jacobian(&self) -> Option<crate::SparseJacobian<f64>> {
+            Some(crate::SparseJacobian::from_dense(Matrix2::new(
                 0.,0.,
                 0.,-200. * self.params[1],
-            ))
+            )))
         }
     }
     let mut problem = AllButOne {
         params: Vector2::<f64>::new(0., 1. / 3.),
     };
     let jac_num = differentiate_numerically(&mut problem).unwrap();
-    let jac_trait = problem.jacobian().unwrap();
+    let jac_trait = problem.jacobian().unwrap().to_dense::<U2, U2>();
     assert_relative_eq!(jac_num, jac_trait, epsilon = 1e-12);
 }

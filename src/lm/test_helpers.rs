@@ -3,7 +3,7 @@ use core::cell::RefCell;
 
 use nalgebra::{DefaultAllocator, Dim, OMatrix, OVector, allocator::Allocator, storage::Owned};
 
-use crate::LeastSquaresProblem;
+use crate::{LeastSquaresProblem, SparseJacobian};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MockCall {
@@ -51,7 +51,6 @@ where
 {
     type ResidualStorage = Owned<f64, M>;
     type ParameterStorage = Owned<f64, N>;
-    type JacobianStorage = Owned<f64, M, N>;
 
     fn set_params(&mut self, params: &OVector<f64, N>) {
         self.params.push(params.clone());
@@ -72,11 +71,13 @@ where
         }
     }
 
-    fn jacobian(&self) -> Option<OMatrix<f64, M, N>> {
+    fn jacobian(&self) -> Option<SparseJacobian<f64>> {
         self.call_history.borrow_mut().push(MockCall::Jacobian);
         if *self.jacobians_index.borrow() < self.jacobians.len() {
             *self.jacobians_index.borrow_mut() += 1;
-            self.jacobians[*self.jacobians_index.borrow() - 1].clone()
+            self.jacobians[*self.jacobians_index.borrow() - 1]
+                .clone()
+                .map(SparseJacobian::from_dense)
         } else {
             None
         }
