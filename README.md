@@ -48,13 +48,6 @@ assert!(report.termination.was_successful());
 let (_problem, _report) = LevenbergMarquardt::new()
     .with_sparse_solver(true)
     .minimize(Problem::new(initial_params));
-
-// Schur-style sparse backend for BA-like parameter layout where
-// cameras/state come first and landmarks/points come after.
-let (_problem, _report) = LevenbergMarquardt::new()
-    .with_sparse_solver(true)
-    .with_sparse_schur_camera_variables(num_camera_variables)
-    .minimize(Problem::new(initial_params));
 ```
 
 # References

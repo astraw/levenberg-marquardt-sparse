@@ -2,7 +2,6 @@ use crate::qr::{LinearLeastSquaresDiagonalProblem, PivotedQR};
 use crate::trust_region::{LMParameter, determine_lambda_and_parameter_update};
 use crate::utils::{enorm, epsmch};
 use crate::{LeastSquaresProblem, SparseJacobian};
-use alloc::{collections::BTreeMap, vec::Vec};
 use nalgebra::{
     DefaultAllocator, Dim, DimMax, DimMaximum, DimMin, OVector, RealField, Vector,
     allocator::{Allocator, Reallocator},
@@ -113,7 +112,6 @@ pub struct LevenbergMarquardt<F> {
     patience: usize,
     scale_diag: bool,
     use_sparse_solver: bool,
-    sparse_schur_camera_variables: Option<usize>,
 }
 
 impl<F: RealField + Float> Default for LevenbergMarquardt<F> {
@@ -134,7 +132,6 @@ impl<F: RealField + Float> LevenbergMarquardt<F> {
                 patience: 100,
                 scale_diag: true,
                 use_sparse_solver: false,
-                sparse_schur_camera_variables: None,
             }
         } else {
             let user_tol = F::default_epsilon() * convert(30.0);
@@ -146,7 +143,6 @@ impl<F: RealField + Float> LevenbergMarquardt<F> {
                 patience: 100,
                 scale_diag: true,
                 use_sparse_solver: false,
-                sparse_schur_camera_variables: None,
             }
         }
     }
@@ -268,22 +264,6 @@ impl<F: RealField + Float> LevenbergMarquardt<F> {
     pub fn with_sparse_solver(self, use_sparse_solver: bool) -> Self {
         Self {
             use_sparse_solver,
-            ..self
-        }
-    }
-
-    /// Configure Schur-style elimination for the sparse solver.
-    ///
-    /// This splits the parameter vector into two blocks:
-    /// - camera/state variables in `[0, sparse_schur_camera_variables)`
-    /// - point/landmark variables in `[sparse_schur_camera_variables, n)`
-    ///
-    /// When enabled together with `with_sparse_solver(true)`, the sparse path
-    /// uses a Schur-complement solve tailored to bundle-adjustment-like structure.
-    #[must_use]
-    pub fn with_sparse_schur_camera_variables(self, sparse_schur_camera_variables: usize) -> Self {
-        Self {
-            sparse_schur_camera_variables: Some(sparse_schur_camera_variables),
             ..self
         }
     }
@@ -426,21 +406,9 @@ impl<F: RealField + Float> LevenbergMarquardt<F> {
                 {
                     inner_tries += 1;
                 }
-                let step = if let Some(n_camera) = self.sparse_schur_camera_variables {
-                    if n_camera > 0 && n_camera < n {
-                        solve_damped_normal_equations_schur::<F, N>(
-                            &jacobian, &jt_r, &lm.diag, &col_norms, lambda, n, n_camera,
-                        )
-                    } else {
-                        solve_damped_normal_equations::<F, N>(
-                            &jacobian, &jt_r, &lm.diag, &col_norms, lambda, n,
-                        )
-                    }
-                } else {
-                    solve_damped_normal_equations::<F, N>(
-                        &jacobian, &jt_r, &lm.diag, &col_norms, lambda, n,
-                    )
-                };
+                let step = solve_damped_normal_equations::<F, N>(
+                    &jacobian, &jt_r, &lm.diag, &col_norms, lambda, n,
+                );
 
                 let pnorm = scaled_norm(&step, &lm.diag);
                 if !pnorm.is_finite() && !cfg!(feature = "minpack-compat") {
@@ -742,197 +710,6 @@ where
     }
 
     x
-}
-
-fn solve_damped_normal_equations_schur<F, N>(
-    jacobian: &SparseJacobian<F>,
-    jt_r: &OVector<F, N>,
-    diag: &OVector<F, N>,
-    col_norms: &OVector<F, N>,
-    lambda: F,
-    n: usize,
-    n_camera: usize,
-) -> OVector<F, N>
-where
-    F: RealField + Float + Copy,
-    N: Dim,
-    DefaultAllocator: Allocator<N>,
-{
-    let n_point = n - n_camera;
-    if n_point == 0 {
-        return solve_damped_normal_equations(jacobian, jt_r, diag, col_norms, lambda, n);
-    }
-
-    let mut rows: Vec<Vec<(usize, F)>> = alloc::vec![Vec::new(); jacobian.rows];
-    for &(r, c, v) in jacobian.entries.iter() {
-        if r < rows.len() && c < n {
-            rows[r].push((c, v));
-        }
-    }
-
-    let mut b = alloc::vec![F::zero(); n_camera * n_camera];
-    let mut c_diag = alloc::vec![F::zero(); n_point];
-    let mut e_by_point: Vec<BTreeMap<usize, F>> = (0..n_point).map(|_| BTreeMap::new()).collect();
-
-    for row in rows.iter() {
-        let mut cams: Vec<(usize, F)> = Vec::new();
-        let mut pts: Vec<(usize, F)> = Vec::new();
-        for &(col, val) in row.iter() {
-            if col < n_camera {
-                cams.push((col, val));
-            } else {
-                pts.push((col - n_camera, val));
-            }
-        }
-
-        for &(ci, vi) in cams.iter() {
-            for &(cj, vj) in cams.iter() {
-                b[ci * n_camera + cj] += vi * vj;
-            }
-        }
-
-        for &(pj, vj) in pts.iter() {
-            c_diag[pj] += vj * vj;
-        }
-
-        for &(ci, vi) in cams.iter() {
-            for &(pj, vj) in pts.iter() {
-                let entry = e_by_point[pj].entry(ci).or_insert(F::zero());
-                *entry += vi * vj;
-            }
-        }
-    }
-
-    let mut rhs_c = alloc::vec![F::zero(); n_camera];
-    let mut rhs_p = alloc::vec![F::zero(); n_point];
-    for i in 0..n_camera {
-        rhs_c[i] = jt_r[i];
-    }
-    for i in 0..n_point {
-        rhs_p[i] = jt_r[n_camera + i];
-    }
-
-    for i in 0..n_camera {
-        b[i * n_camera + i] += lambda * diag[i] * diag[i];
-    }
-    for i in 0..n_point {
-        c_diag[i] += lambda * diag[n_camera + i] * diag[n_camera + i];
-        if c_diag[i] <= F::default_epsilon() {
-            c_diag[i] = F::default_epsilon();
-        }
-    }
-
-    let mut schur = b.clone();
-    let mut schur_rhs = rhs_c;
-    for p in 0..n_point {
-        if e_by_point[p].is_empty() {
-            continue;
-        }
-        let inv_c = Float::recip(c_diag[p]);
-        let entries: Vec<(usize, F)> = e_by_point[p].iter().map(|(k, v)| (*k, *v)).collect();
-        for &(ai, eai) in entries.iter() {
-            schur_rhs[ai] -= eai * rhs_p[p] * inv_c;
-            for &(aj, eaj) in entries.iter() {
-                schur[ai * n_camera + aj] -= eai * eaj * inv_c;
-            }
-        }
-    }
-
-    let dc = cg_dense_symmetric(&schur, &schur_rhs, n_camera);
-
-    let mut out = OVector::<F, N>::zeros_generic(Dim::from_usize(n), Dim::from_usize(1));
-    for i in 0..n_camera {
-        out[i] = dc[i];
-    }
-
-    for p in 0..n_point {
-        let mut accum = rhs_p[p];
-        for (&ci, &e_val) in e_by_point[p].iter() {
-            accum -= e_val * dc[ci];
-        }
-        out[n_camera + p] = accum / c_diag[p];
-    }
-
-    out
-}
-
-fn cg_dense_symmetric<F>(a: &[F], b: &[F], n: usize) -> Vec<F>
-where
-    F: RealField + Float + Copy,
-{
-    // Jacobi preconditioner: diagonal of a
-    let m_inv: alloc::vec::Vec<F> = (0..n)
-        .map(|i| {
-            let d = a[i * n + i];
-            if d > F::default_epsilon() {
-                F::one() / d
-            } else {
-                F::one()
-            }
-        })
-        .collect();
-
-    let mut x = alloc::vec![F::zero(); n];
-    let mut r = b.to_vec();
-    let mut z: alloc::vec::Vec<F> = r.iter().enumerate().map(|(i, &ri)| ri * m_inv[i]).collect();
-    let mut p = z.clone();
-    let bz0 = Float::max(dot_slice(b, &z), F::default_epsilon());
-    let tol_sq = Float::powi(
-        Float::max(convert(1.0e-10f64), F::default_epsilon() * convert(10.0f64)),
-        2,
-    );
-    let mut rz_old = dot_slice(&r, &z);
-
-    let max_iter = 2 * n + 20;
-    let mut ap = alloc::vec![F::zero(); n];
-    for _ in 0..max_iter {
-        if rz_old <= tol_sq * bz0 {
-            break;
-        }
-
-        for i in 0..n {
-            let mut sum = F::zero();
-            for j in 0..n {
-                sum += a[i * n + j] * p[j];
-            }
-            ap[i] = sum;
-        }
-
-        let denom = dot_slice(&p, &ap);
-        if Float::abs(denom) <= F::default_epsilon() || !denom.is_finite() {
-            break;
-        }
-        let alpha = rz_old / denom;
-        for i in 0..n {
-            x[i] += alpha * p[i];
-            r[i] -= alpha * ap[i];
-            z[i] = r[i] * m_inv[i];
-        }
-
-        let rz_new = dot_slice(&r, &z);
-        if rz_new <= tol_sq * bz0 {
-            break;
-        }
-
-        let beta = rz_new / rz_old;
-        for i in 0..n {
-            p[i] = z[i] + beta * p[i];
-        }
-        rz_old = rz_new;
-    }
-    x
-}
-
-fn dot_slice<F>(a: &[F], b: &[F]) -> F
-where
-    F: RealField + Float + Copy,
-{
-    let mut s = F::zero();
-    let n = core::cmp::min(a.len(), b.len());
-    for i in 0..n {
-        s += a[i] * b[i];
-    }
-    s
 }
 
 fn sparse_normal_op_mul<F, N>(

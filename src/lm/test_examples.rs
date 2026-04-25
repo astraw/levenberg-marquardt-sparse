@@ -643,16 +643,4 @@ fn test_sparse_solver_smoke() {
     assert!(report.objective_function.is_finite());
 }
 
-#[test]
-fn test_sparse_schur_solver_smoke() {
-    let problem = LinearFullRank::new(OVector::<f64, U5>::from_element(1.0), 200);
-    let (_problem, report) = LevenbergMarquardt::new()
-        .with_patience(500)
-        .with_sparse_solver(true)
-        .with_sparse_schur_camera_variables(2)
-        .minimize(problem);
-    assert!(!report.termination.was_usage_issue());
-    assert!(report.objective_function.is_finite());
-}
-
 include!("test_examples_gen.rs");
