@@ -249,6 +249,8 @@ impl<F: RealField + Float> LevenbergMarquardt<F> {
         let mut lambda = Float::max(F::default_epsilon(), convert(1.0e-6f64));
         let mut exhausted_outer_loops = 0usize;
         let exhausted_outer_limit = 8usize;
+        let mut stagnation_count = 0usize;
+        let stagnation_limit = 12usize;
 
         loop {
             let jacobian = match lm.jacobian() {
@@ -378,6 +380,9 @@ impl<F: RealField + Float> LevenbergMarquardt<F> {
                         new_objective_function,
                         step,
                         pnorm,
+                        actual_reduction,
+                        predicted_reduction,
+                        ratio,
                     ));
                     #[cfg(feature = "tracing")]
                     debug!(
@@ -397,7 +402,7 @@ impl<F: RealField + Float> LevenbergMarquardt<F> {
                     ratio = format_args!("{:?}", ratio),
                     "sparse step rejected, increasing lambda"
                 );
-                lambda *= convert(10.0f64);
+                lambda *= convert(2.0f64);
                 lm.target.set_params(&lm.x);
             }
 
@@ -431,13 +436,41 @@ impl<F: RealField + Float> LevenbergMarquardt<F> {
 
             exhausted_outer_loops = 0;
 
-            let (new_residuals, new_residuals_norm, new_objective_function, _step, pnorm) =
-                accepted_residuals.expect("accepted step must exist");
+            let prev_objective = lm.report.objective_function;
+
+            let (
+                new_residuals,
+                new_residuals_norm,
+                new_objective_function,
+                _step,
+                pnorm,
+                actual_reduction,
+                predicted_reduction,
+                ratio,
+            ) = accepted_residuals.expect("accepted step must exist");
 
             core::mem::swap(&mut lm.x, &mut lm.tmp);
             lm.residuals_norm = new_residuals_norm;
             lm.report.objective_function = new_objective_function;
             residuals = new_residuals;
+
+            let objective_scale = Float::max(prev_objective, F::one());
+            let rel_obj_change = Float::abs(prev_objective - new_objective_function) / objective_scale;
+            let stagnation_tol = Float::max(
+                lm.config.ftol,
+                Float::sqrt(Float::max(F::default_epsilon(), convert(1.0e-16f64))),
+            );
+            if rel_obj_change <= stagnation_tol {
+                stagnation_count += 1;
+            } else {
+                stagnation_count = 0;
+            }
+            if stagnation_count >= stagnation_limit {
+                return lm.into_report(TerminationReason::Converged {
+                    ftol: true,
+                    xtol: false,
+                });
+            }
 
             if lm.config.scale_diag {
                 lm.tmp.cmpy(F::one(), &lm.diag, &lm.x, F::zero());
@@ -452,7 +485,12 @@ impl<F: RealField + Float> LevenbergMarquardt<F> {
 
             let xtol_check = lm.delta <= lm.config.xtol * lm.xnorm
                 || pnorm <= lm.config.xtol * (lm.xnorm + lm.config.xtol);
-            let ftol_check = lm.report.objective_function <= lm.config.ftol;
+            // MINPACK-style relative reduction test for ftol.
+            // This lets us declare convergence even when residuals are non-zero
+            // (e.g., noisy data) once further progress becomes negligible.
+            let ftol_check = Float::abs(actual_reduction) <= lm.config.ftol
+                && predicted_reduction <= lm.config.ftol
+                && convert::<f64, F>(0.5) * ratio <= F::one();
             if ftol_check || xtol_check {
                 return lm.into_report(TerminationReason::Converged {
                     ftol: ftol_check,
