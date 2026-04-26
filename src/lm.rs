@@ -455,7 +455,8 @@ impl<F: RealField + Float> LevenbergMarquardt<F> {
             residuals = new_residuals;
 
             let objective_scale = Float::max(prev_objective, F::one());
-            let rel_obj_change = Float::abs(prev_objective - new_objective_function) / objective_scale;
+            let rel_obj_change =
+                Float::abs(prev_objective - new_objective_function) / objective_scale;
             let stagnation_tol = Float::max(
                 lm.config.ftol,
                 Float::sqrt(Float::max(F::default_epsilon(), convert(1.0e-16f64))),
