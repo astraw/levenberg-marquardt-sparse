@@ -1,6 +1,6 @@
 [package]
 name = "levenberg-marquardt-sparse"
-version = "0.1.1"
+version = "0.1.2"
 authors = [
     "Jannik Schürg <schuerg@ins.uni-bonn.de>",
     "Geordon Worley <vadixidav@gmail.com>",
